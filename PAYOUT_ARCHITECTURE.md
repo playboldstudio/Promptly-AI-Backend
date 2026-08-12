@@ -1,11 +1,15 @@
-# Promptly AI — Creator Payments & Payouts Architecture
+# Promptly AI — Payments & Payouts Architecture (UPI manual settle)
 
-> **Status:** Design document for the creator payout flow using **Razorpay Route /
-> Linked Accounts**. This replaces the current manual-settle (UPI + admin bank
-> transfer) model so creators are represented through Razorpay's supported
-> marketplace/Linked Account flow, not as raw bank-detail recipients.
+> **Status:** Design doc for the **live** payment flow in this repo
+> (`Promptly-AI-Backend`). Simple and UPI-based: **no creator KYC / PAN / bank
+> account**, no Razorpay Route / Linked Accounts / RazorpayX for MVP. Subscribed
+> users earn, then withdraw to their UPI — an **admin approves the request and
+> transfers from the admin's own UPI app**, then marks it paid/failed.
 >
-> Companion to `DATABASE_SCHEMA.md` and the Android `Promptly-AI` repo.
+> This is the design implemented by `src/services/payments/*`, `src/routes/*` and
+> `src/db/models/*`. Match the Android app contract in the `Promptly-AI` repo.
+>
+> Companion to the repo README's "Money model" section.
 
 ---
 
@@ -15,262 +19,237 @@
 |---|---|
 | **BLUE** | Promptly / platform (Android app, Node/Express backend, admin) |
 | **GREEN** | Razorpay |
-| **PURPLE** | Creator |
+| **PURPLE** | Creator (a subscribed user) |
 | **ORANGE** | Customer / normal user |
 | **RED** | Failure / error |
 
 ---
 
-## 1. Platform setup
+## 1. Money model (three streams, all Razorpay)
+
+1. **Subscriptions** — user picks **Pro (₹49/mo)** or **Creator (₹99/mo)** and pays
+   via Razorpay **Subscriptions** (recurring). Powers posting perks + payout
+   eligibility. Backend: `src/services/payments/subscriptions.service.js`.
+2. **Paid prompt sales** — a buyer unlocks a creator's prompt via Razorpay
+   **Checkout**. Money lands in **Promptly's** account; the creator's share is
+   `net = price × (100 − fee%) / 100` (Pro=5% fee, Creator=0%, configurable).
+   Backend: `src/services/payments/checkout.service.js`.
+3. **Creator payouts** — a **subscribed** creator (Pro/Creator) who reaches the
+   withdrawal minimum requests a withdrawal → **admin** transfers from the admin's
+   own UPI app to the creator's saved UPI → admin marks it **paid** (or **failed**).
+   Backend: `src/services/payments/payouts.service.js`.
+
+Key decisions baked in:
+
+- **No** RazorpayX / Route / Linked Accounts / separate merchant accounts.
+- **No** creator KYC, PAN, or bank account — a saved **UPI ID** is the payout
+  destination (`POST /me/upi`).
+- All money is **integer rupees** (never floats).
+- Every credit/debit writes one row to `transactions` (the ledger).
+- A payout **reserves** the balance at request time (ledger debit), so the same
+  money can't be withdrawn twice; admin marking it paid is final bookkeeping, and
+  marking it failed **returns** the reserved balance.
 
 ```
-[BLUE] Promptly Business
-   └─ owns the PRIMARY Razorpay account (merchant of record)
-
-[GREEN] Razorpay Business Account
-   └─ Complete Razorpay KYC/onboarding for Promptly (business entity)
-   └─ ENABLE PRODUCT: Route / Linked Accounts (marketplace payouts)
-        │
-        │  An ordinary Payment Gateway account does NOT automatically include
-        │  marketplace payouts. Route/Linked-Account access is product-gated and
-        │  depends on Promptly's business type & eligibility.
-        │  => VERIFY WITH RAZORPAY before implementation.
-        │
-   └─ Configure settlement model (T+0/T+1, on-hold window, optional profit sharing)
-   └─ Generate TEST API keys (rzp_test_*)
-   └─ Create Pro / Creator subscription plans (already in backend seed)
-
-[BLUE] Backend integration (this repo)
-   └─ Test Mode (test orders, test linked accounts, ngrok/tunnel for webhooks)
-        │  Successful end-to-end test
-        ▼
-   └─ LIVE API keys (rzp_live_*) + real webhook secret + PUBLIC_BASE_URL
-        ▼
-   PRODUCTION
+Subscriptions  Subscriber ──(₹/mo, Razorpay Subscriptions)──► Platform
+Paid prompts   Buyer ──────(₹, Razorpay Checkout)───────────► Platform pool
+                                                              │  net = price × (100 − fee%) / 100
+                                                              ▼
+                                                       Creator balance (ledger)
+                                                              │  withdraw (min, via saved UPI)
+                                                              ▼  admin transfers via their OWN UPI app
+                                                              ▼
+                                                       Creator's UPI (paid)
 ```
 
 ---
 
-## 2. Creator onboarding
+## 2. Platform setup (what Promptly needs in Razorpay)
 
 ```
-[PURPLE] Normal user taps "Become a Creator"
+[BLUE] Promptly Business → [GREEN] Razorpay Business Account (KYC done)
    │
-[BLUE] Accept Creator Terms
+   ├─ Checkout   — works out of the box (payment gateway)
+   ├─ Subscriptions — create two plans in the dashboard:
+   │      Pro ₹49/mo → RAZORPAY_PLAN_PRO_ID
+   │      Creator ₹99/mo → RAZORPAY_PLAN_CREATOR_ID
+   ├─ Webhooks   — point at POST /webhooks/razorpay with a real secret
    │
-[BLUE] Creator Profile setup
-   │
-   ▼
-[BLUE] Start payout onboarding
-   │
-[GREEN] CREATE LINKED ACCOUNT (type = route)
-   │   legal_info (name / PAN), contact info, bank account / VPA
-   │   Razorpay auto-creates Contact + Fund Account
-   │
-[GREEN] Creator completes Razorpay KYC / verification
-   │   (email/SMS onboarding link - individual vs business docs)
-   │
-   ├─[GREEN] status: pending -> active (verified) ───────────────► ELIGIBLE
-   │
-   └─[RED]   rejected / suspended / inactive
-              │  block withdrawals; allow re-submission / re-KYC
-   │
-[BLUE] Backend syncs onboarding state
-   │   (poll linked-account status + subscribe to linked-account webhooks)
-   │
-[BLUE] Persist on the creator row:
-   │   razorpay_linked_account_id, fund_account_id,
-   │   onboarding_status (none|pending|verified|rejected|suspended),
-   │   payout_status (eligible|blocked)
-   │
-   ▼
-[PURPLE] Creator can now receive earnings + request withdrawals
+   ├─ TEST keys (rzp_test_*) → backend integration → end-to-end test
+   └─ LIVE keys (rzp_live_*) → production
 ```
 
-The creator is **not** a separate merchant, never handles Razorpay funds directly
-for sales, and Promptly never manually transfers bank details. Every payout is a
-Razorpay transfer to the creator's Linked Account, which settles to their bank.
+> **Not required for MVP:** Route / Linked Accounts / RazorpayX. They add creator
+> KYC and business verification — the opposite of this design. Revisit only if you
+> later want fully automated payouts without an admin in the loop.
+>
+> Verify with Razorpay that the subscription billing model fits Promptly's business
+> type and current Indian compliance (TDS/GST on creator payments when you scale).
 
 ---
 
-## 3. Paid prompt purchase (example: price ₹50)
+## 3. Becoming a subscriber (buyer)
 
 ```
-[ORANGE] User taps "Buy - Cyberpunk Samurai ₹50"
+[ORANGE] User opens plan screen → taps "Upgrade to Pro/Creator"
+[BLUE]  POST /payments/subscriptions { planId: "pro" | "creator" }
+[BLUE]  validate plan active + no existing active subscription
+[GREEN] create Razorpay subscription → returns short_url
+[ORANGE] app opens short_url → user pays the first month
+[GREEN] webhook subscription.charged
+[BLUE]  verify signature + idempotent dedupe
+[BLUE]  activate the UserSubscription row + ledger debit (subscription_payment)
+[ORANGE] user is now Pro/Creator (perks + payout eligibility unlocked)
+[GREEN] renewals → subscription.charged again → period rolls forward
+       cancel/expire → subscription.cancelled / .expired → status flips
+```
+
+Routes: `POST /payments/subscriptions` → `src/services/payments/subscriptions.service.js`;
+activation from the webhook → `activateSubscription()`.
+
+---
+
+## 4. Creator eligibility (no KYC, no PAN, no bank)
+
+Any user can publish free prompts. To **earn from paid prompts** the account needs:
+
+- **Active paid subscription** (Pro or Creator plan) — unlocks paid posting / lower fees.
+- **Saved UPI ID** on the profile (`POST /me/upi`, shape-validated) — the payout
+  destination. No document upload, no PAN, no bank-account number.
+
+```
+[PURPLE] user becomes a subscribed creator
    │
+[BLUE]  save UPI ID on profile (POST /me/upi)  ← THE ONLY payout requirement
+   │
+[BLUE]  eligibility for withdrawal =
+   │        active paid subscription (pro/creator)
+   │        + saved valid UPI ID
+   │        + available balance ≥ minimum withdrawal
+   ▼
+[PURPLE] can publish paid prompts → buyers pay → earnings accrue → can withdraw
+```
+
+> The UPI ID is **snapshotted onto the payout row at request time**, so the creator
+> changing UPI later never redirects a pending payment.
+>
+> TODO (backend): the current `requestPayout()` checks the saved UPI and balance but
+> **hasn't yet gated on an active paid subscription** — add GATE 1 below in
+> `src/services/payments/payouts.service.js`.
+
+---
+
+## 5. Paid prompt purchase (example: price ₹50)
+
+```
+[ORANGE] User taps "Buy — Cyberpunk Samurai ₹50"
 [BLUE]  POST /payments/checkout/order { promptId }
-   │   validates paid + published, rejects duplicate purchase
-   │   computes split with a CONFIGURABLE commission (e.g. 20%)
-   │   creates a Razorpay ORDER (₹50 = 5000 paise)
-   ▼
-[GREEN] Razorpay Order created
-   │
-[ORANGE] User completes Razorpay Checkout (UPI / card / netbanking)
-   ▼
-[GREEN] PAYMENT CAPTURED -> ₹50 lands in PROMPTLY's balance (merchant of record)
-   │   ("Where does the money initially go?" -> Promptly primary account, NOT creator)
-   │
-   ├──> [GREEN] Webhook `payment.captured` -> [BLUE] backend
-   │        verify HMAC signature -> idempotent dedupe -> handle
-   │
-[BLUE] Unlock prompt for buyer (prompt text returned)
-[BLUE] Write DB rows (one transaction):
-   │   prompt_purchases (status=completed, priceInr=50, platformFeeInr=10, netInr=40)
-   │   ledger CREDIT creator  ₹40   status=PENDING       (earnings)
-   │   platform fee ₹10 recorded separately (stays in platform balance)
-   │
-[ORANGE] User gets the prompt
+   │    validate paid + published + one-unlock-per-buyer
+   │    compute fee from the BUYER's subscription (Pro=5%, Creator=0%)
+[GREEN] create Razorpay order (₹50 = 5000 paise)
+[ORANGE] user completes Razorpay Checkout
+[GREEN] payment captured → ₹50 into PROMPTLY's account (merchant of record)
+[BLUE]  POST /payments/checkout/verify → HMAC signature verified server-side
+[BLUE]  DB transaction:
+   │    prompt_purchases  priceInr=50, platformFeeInr=?, netInr=?
+   │    ledger CREDIT creator  net   (earnings)
+   │    ledger DEBIT buyer      50   (purchase)
+[ORANGE] user gets the prompt unlocked
 ```
 
-Money split (configurable commission percent in env/backend config):
-- Creator share: **₹40 -> PENDING earnings**
-- Platform fee: **₹10 -> Promptly revenue** (settles to Promptly's own bank like a normal merchant settlement)
+The exact split is backend-configurable (fee percent on the subscription plan).
 
 ---
 
-## 4. Creator earnings ledger
-
-Do not treat PENDING as pay-out-able money. Internal state machine per earning row:
+## 6. Withdrawal — request → admin approve → admin transfer → mark paid (min, UPI)
 
 ```
-PENDING  --(hold/settle window, configurable e.g. T+7 / on_hold_until)-->  AVAILABLE
-                              (in Option B: purely date-driven)
-AVAILABLE --(withdrawal request + successful Razorpay transfer)-->  WITHDRAWN
-```
-
-Creator dashboard (extends the existing `/me/earnings` contract in
-`src/services/earnings.service.js`):
-
-| Field | Meaning |
-|---|---|
-| **Total Earnings** | Sum of creator share of completed sales (lifetime) |
-| **Pending Earnings** | share inside the hold window / awaiting settlement |
-| **Available Balance** | settled minus reserved withdrawals |
-| **Withdrawn** | sum of successfully settled transfers |
-| **Lifetime Earnings** | Available + Withdrawn (+ in-flight processing) |
-
-Schema guidance over the draft (integer rupees, status machines only):
-
-| Entity | Fields to add / use |
-|---|---|
-| `users` | `razorpay_linked_account_id`, `fund_account_id`, `onboarding_status`, `payout_status` |
-| `prompt_purchases` (acts as `CreatorTransaction`) | freeze `price_inr`, `platform_fee_inr`, `net_inr` at sale; add `earning_status` (pending\|available\|withdrawn\|reversed) |
-| `transactions` | authoritative ledger (already exists) |
-| `payouts` (acts as `CreatorWithdrawal`) | add `razorpay_transfer_id`, `on_hold`, `hold_until`, `transfer_status`, `settlement_id`, `processed_at` |
-
----
-
-## 5. Minimum withdrawal (Available ₹135, min ₹100)
-
-```
-[PURPLE] Creator taps "Withdraw ₹135"
+[PURPLE] Creator sees Available and taps "Withdraw ₹50"
+[BLUE]  GATE 1  active paid subscription (pro/creator)      → else [RED] "Subscriber only"
+[BLUE]  GATE 2  saved UPI ID present                       → else [RED] "Add UPI on your profile"
+[BLUE]  GATE 3  amount ≥ MIN_WITHDRAWAL_INR (₹60 default)  → else [RED] "Below minimum"
+[BLUE]  GATE 4  amount ≤ available balance                 → else [RED] "Insufficient balance"
+[BLUE]  GATE 5  no payout already pending/processing        → else [RED] "Already processing"
    │
-[BLUE]  GATE 1  availableBalance >= MIN_WITHDRAWAL_INR (₹100)        -> else [RED] "Below minimum"
-[BLUE]  GATE 2  amount <= availableBalance                           -> else [RED] "Insufficient balance"
-[BLUE]  GATE 3  onboarding_status = verified & linked account ACTIVE -> else [RED] "Finish KYC first"
-[BLUE]  GATE 4  no payout already pending/processing (idempotency)   -> else [RED] "Already processing"
-   │
-[BLUE]  DB TRANSACTION (all-or-nothing):
-   │     create payout (status=PENDING, amountInr=135)
-   │     ledger DEBIT ₹135 (reserves the balance)
-   │
+[BLUE]  DB transaction (all-or-nothing):
+   │      create payout (status=PENDING, amountInr, upiId snapshot)
+   │      ledger DEBIT amountInr  ← reserves the balance
    ▼
-[GREEN] POST /v1/transfers { account_id: <linked_account>, amount: 13500, notes: { payoutId } }
-   │   returns transfer_id - ACCEPT, not SUCCESS
+[BLUE] ADMIN review (GET /payments/admin/payouts?status=pending)
+   │      shows creator, amount, UPI to pay to
    │
-[BLUE]  save razorpay_transfer_id; payout.status = PROCESSING
+[BLUE] ADMIN transfers the amount via the ADMIN's own UPI app → creator's UPI
    │
-[GREEN] async pipeline: transfer.created -> transfer.processing -> transfer.processed (settled)
+   ├── ADMIN marks PAID (POST /payments/admin/payouts/:id/mark-paid)
+   │        → payout.status = paid   ✅
    │
-   ├──[GREEN] webhook `transfer.processed` -> [BLUE] verify signature + dedupe
-   │        payout.status = PAID/SUCCESS; processedAt = now        -> [PURPLE] "Withdrawal Successful"
-   │
-   └──[RED] webhook `transfer.failed` / `transfer.reversed`
-             payout.status = FAILED
-             ledger CREDIT ₹135 (returns reservation)              -> balance restored, retry allowed
+   └── ADMIN marks FAILED (POST /payments/admin/payouts/:id/mark-failed)
+            → payout.status = failed
+            → ledger CREDIT amountInr   ← balance returned, retry allowed
 ```
 
-`MIN_WITHDRAWAL_INR` is backend-configurable (project uses ₹100; increase the current
-₹60 value used by the manual-settle flow in `src/services/payments/payouts.service.js`).
-
----
-
-## 6. Automatic vs manual payout — recommendation
-
-| | **Option A - auto-transfer at purchase** | **Option B - accumulate + withdraw on demand** |
-|---|---|---|
-| When transfer happens | at sale (`on_hold`), auto-release T+N | only when the creator withdraws |
-| Movement | per-sale transfer + on-hold toggle + release | one transfer per withdrawal |
-| Refund story | creator money may already be moving -> recover from hold/reversal | money still in platform balance -> refund purely platform-side |
-| Webhooks / edge cases | many (per sale) | few (only withdrawals) |
-| Complexity | higher | lower |
-| Fits existing code | needs checkout rewrite | maps to current `payouts` service (replace manual settle with transfer + webhook) |
-
-> **Recommendation for MVP: Option B.** Money is retained correctly in the Promptly
-> primary account (no payout risk on a later-refunded sale), failure handling is one
-> repeated pattern, and it matches the ledger already built. Move to Option A (with
-> per-sale `on_hold`) later for better creator UX.
+- `payout.status`: `pending → paid` (bookkeeping: the money is already reserved in
+  the ledger at request time) or `pending → failed` (reservation reversed).
+- No Razorpay transfer API and **no webhook** for the payout itself — the admin's
+  action is the source of truth.
+- ⚠️ Security: `POST /payments/admin/*` is currently gated only by `requireAuth`.
+  Add a real admin check before production.
 
 ---
 
 ## 7. Money flow diagram
 
 ```
-           [ORANGE] NORMAL USER
-                │   ₹50 via Razorpay Checkout
-                ▼
-            [GREEN] RAZORPAY  --payment.captured--> [BLUE] PROMPTLY PRIMARY ACCOUNT
-                                                        │  money lands HERE first (merchant of record)
-                                                        │  ₹50 in platform balance
-                                                        │
-                                    ┌───────────────────┴────────────────────┐
-                                    ▼                                        ▼
-                     [BLUE] Promptly fee ₹10                     [PURPLE] Creator share ₹40
-                     (settles to Promptly's own                     │
-                     bank like normal merchant)                     ▼
-                                                            [GREEN] Creator's LINKED ACCOUNT
-                                                                     │  settles per linked-account config
-                                                                     ▼
-                                                                  Creator's Bank
+        [ORANGE] NORMAL USER ────₹ / subscription/checkout────► [GREEN] RAZORPAY
+        [PURPLE] Subscribed creator (Pro/Creator, saved UPI)   │
+                                                               ▼
+                                              [BLUE] PROMPTLY ACCOUNT (pool)
+                                                       │
+                                    ┌──────────────────┴──────────────────┐
+                                    ▼                                     ▼
+                     [BLUE] Platform fee (own revenue)      [PURPLE] Creator share (ledger balance)
+                                    │                                     │  withdraw request
+                                    ▼                                     │
+                     Promptly's bank                        [BLUE] Admin approves → transfers
+                                                               from ADMIN's own UPI app
+                                                               ▼
+                                                     [PURPLE] Creator's UPI (paid)
 ```
 
-Exact movement depends on the Route / Linked-Account configuration: `on_hold` vs
-instant release, settlement schedules, and whether Razorpay **Profit Sharing** is
-enabled (auto-split) or Promptly does the split implicitly (recommended for MVP:
-platform keeps the fee, transfer only the creator share at withdrawal).
+| Step | Who pays whom / where money goes |
+|---|---|
+| Subscription | User → Razorpay → Promptly (recurring) |
+| Paid purchase | Buyer → Razorpay Checkout → Promptly pool |
+| Split | fee stays with Promptly; net credited to creator ledger |
+| Withdrawal | Admin's UPI → Creator's UPI (manual, approved) |
 
 ---
 
 ## 8. Webhook architecture
 
 ```
-[ORANGE] Android App ---> [BLUE] Node/Express API ---> [GREEN] Razorpay API
-                                                           │
-                                     [GREEN] Razorpay events --webhook--> [BLUE] backend (raw body)
-                                                                           │  verify HMAC signature
-                                                                           │  idempotent log (unique dedupe_key) -> replays are no-ops
-                                                                           │  dispatch by event -> DB update
-                                                                           │  (purchases, ledger, payouts, earnings)
-                                                                           ▼
-[ORANGE] App fetches latest status  <--------  [BLUE] GET /me/... (status)
+[ORANGE] Android App ──► [BLUE] Node/Express API ──► [GREEN] Razorpay API
+                                                         │
+                          [GREEN] Razorpay events ──webhook──► [BLUE] backend (raw body)
+                                                                  │  verify HMAC signature
+                                                                  │  idempotent log (unique dedupe_key) → replays are no-ops
+                                                                  │  dispatch → activate/deactivate subscription, mark sale
+                                                                  ▼
+[ORANGE] App fetches latest status ◄── GET /me/... (profile, earnings, transactions)
 ```
 
-Events to handle (exact names to verify in the current Razorpay docs; this repo's
-`src/services/webhooks.service.js` already implements signature verification +
-dedupe + dispatch, extend the dispatch table):
+Implemented in `src/services/webhooks.service.js` + `src/routes/webhooks.js`
+(mounted with `express.raw` in `src/app.js`).
 
 | Event | Action |
 |---|---|
-| `payment.failed` | nothing to credit |
-| `payment.captured` | unlock prompt + write earnings ledger (PENDING) |
-| `transfer.created` / `processing` | payout state = PROCESSING |
-| `transfer.processed` | payout = PAID / SUCCESS |
-| `transfer.failed` / `reversed` | payout = FAILED, reverse the reservation |
-| `refund.*` / payment `reversed` | open refund flow; reverse / redact creator earnings |
-| `linked_account.*` onboarding events | refresh creator eligibility |
+| `payment.captured` | verify → unlock purchase + ledger credit (covered by checkout verify too) |
+| `subscription.charged` | activate/roll-forward subscription + ledger debit |
+| `subscription.cancelled` / `.expired` | deactivate subscription |
 
-**Rule:** success is set **only** when the transfer reaches `processed` / settled via
-webhook — never when `transfer.create` merely returns an ID.
+**Payouts have no webhook** — they are a manual UPI transfer confirmed by the admin
+(no transfer API → no transfer webhooks). The Android app simply re-fetches
+`me/earnings` + payout status after the admin acts.
 
 ---
 
@@ -278,24 +257,19 @@ webhook — never when `transfer.create` merely returns an ID.
 
 | # | Failure | Design response | State |
 |---|---|---|---|
-| 1 | Customer payment failed | no `captured` webhook -> nothing written | - |
-| 2 | Captured but webhook delayed | reconcile (poll `/payments/:id`, retry queue) | purchase pending |
-| 3 | Creator onboarding incomplete | GATE 3 blocks withdrawal | withdraw rejected |
-| 4 | Creator account not eligible | `payout_status = blocked`, prompt back-office | withdraw rejected |
-| 5 | Transfer failed | credit ledger back (reserve released), allow retry | payout FAILED |
-| 6 | Insufficient balance | GATE 2 + re-check inside the DB transaction | withdraw rejected |
-| 7 | Duplicate withdrawal | GATE 4 + single active-withdrawal per creator | second request rejected |
-| 8 | Network timeout | transfer may have succeeded -> idempotency key / re-fetch transfer by ID; never double-create | payout PROCESSING |
-| 9 | Webhook delivered twice | unique `dedupe_key` (already built) | replay no-op |
-| 10 | Refund after creator transfer | hold window absorbs it; past that, net out from next earnings | reversal row |
-| 11 | Reversal | `transfer.reversed` webhook -> mark payout reversed, restore ledger | REVERSED |
-
-Withdrawal request guard (idempotency chain):
-
-```
-REQUEST -> existing pending/processing? --yes--> reject
-   no -> create payout(pending) + ledger debit -> transfer.create -> store transfer_id -> await webhook -> final status
-```
+| 1 | Subscription payment failed | no `subscription.charged` → never activated | - |
+| 2 | Checkout payment failed | no capture → no unlock, no ledger write | - |
+| 3 | Payment captured but webhook delayed | buyer paid but not unlocked → verify endpoint reconciles / Razorpay replays | risk: manual unblock |
+| 4 | Creator not subscribed | GATE 1 blocks withdrawal | withdraw rejected |
+| 5 | Creator has no UPI / invalid UPI | GATE 2 blocks withdrawal | withdraw rejected |
+| 6 | Amount below minimum | GATE 3 | withdraw rejected |
+| 7 | Insufficient balance | GATE 4 + re-check inside DB transaction | withdraw rejected |
+| 8 | Duplicate withdrawal request | GATE 5 (single active payout) + DB constraint | second request rejected |
+| 9 | Admin marks failed | ledger credit returns the reservation | payout failed, retry OK |
+| 10 | Admin marks paid by mistake | rejects if not pending; manual correction path | payout paid |
+| 11 | Webhook delivered twice | unique `dedupe_key` | replay no-op |
+| 12 | Network timeout on request | response may not arrive but state is DB-consistent; retry the request | idempotent |
+| 13 | Refund of a paid prompt | platform-side refund; creator's net reversed via ledger (return reservation / net out next earning) | reversal row |
 
 ---
 
@@ -303,47 +277,47 @@ REQUEST -> existing pending/processing? --yes--> reject
 
 | Section | Columns / KPIs |
 |---|---|
-| **Creators** | name, creatorId, linkedAccountId, onboarding status, payout status |
-| **Earnings** | Total GMV, creator earnings, platform revenue, pending, available |
-| **Withdrawals** | pending · processing · successful · failed · reversed (with retry action) |
-| **Transactions** | paymentId · prompt · creator · customer · amount · platform fee · creator share · transferId · status |
+| **Creators** | name, email, plan (pro/creator), UPI ID, subscribed since, payout eligibility |
+| **Earnings** | total GMV, creator earnings, platform revenue, available balance |
+| **Withdrawals** | pending (pay via UPI app) · paid · failed — each with amount, UPI, requestedAt |
+| **Transactions** | paymentId/refId · prompt · creator · customer · amount · platform fee · creator share · status |
 
 ---
 
-## 11. Compliance box (do not hard-code)
+## 11. Compliance / notes (do not hard-code)
 
-- Route / Linked-Account access is **not automatic** — verify eligibility / enablement
-  for Promptly's business type with Razorpay **before** building.
-- Creator KYC, onboarding document lists, individual-vs-company requirements,
-  TDS/GST handling on creator payouts, and settlement minima: **verify with Razorpay
-  and your CA** for current Indian compliance. Keep everything configurable, not
-  asserted in code.
+- No creator KYC/PAN — the payout destination is a user-supplied UPI ID, so confirm
+  Promptly may operate this settlement model under current Indian rules (consult a
+  CA / Razorpay on TDS, GST on commission, and UPI-payout liability).
+- Keep minimum withdrawal (`MIN_WITHDRAWAL_INR`) and fee percent as backend config.
+- **Option to upgrade later:** replace the manual UPI step with RazorpayX Payouts
+  (business-verification required) or Route/Linked Accounts (creator KYC required);
+  the ledger + status model in this doc ports to either.
 
 ---
 
 ## 12. One-screen version (hand to the Android developer)
 
 ```
- CUSTOMER                PROMPTLY (Node/Express + Postgres)                RAZORPAY
- -----------------       ---------------------------------                  --------------
- Buy ₹50 prompt -> POST /payments/checkout/order -> Order -> user pays -> PAYMENT CAPTURED
-                                                                   ^                    | ₹50 -> PROMPTLY account
-                       verify webhook <-- payment.captured <--------|
-                       unlock prompt; ledger: creator +₹40 (PENDING), fee +₹10
- CREATOR
- --------
- Dashboard: Total | Pending | Available | Withdrawn
-      |
-      +-- Withdraw ₹135 --> checks: min ₹100? balance? KYC active? no duplicate?
-                            --> payout(pending) + ledger debit
-                            --> POST /transfers { linked_account } --> transfer_id (NOT success)
-                            --> webhook transfer.processed --> payout = PAID
-                            --> webhook transfer.failed    --> balance restored, retry
- ADMIN: creators · earnings · withdrawals · transactions (all reconcile-able)
+ BUYER                     PROMPTLY (Node/Express + Postgres)                    RAZORPAY
+ -----                     ---------------------------------                      --------
+ Upgrade (₹49/₹99/mo)  -> POST /payments/subscriptions  -> plan short_url -> pay -> subscription.charged
+ Buy ₹50 prompt       -> POST /payments/checkout/order  -> order --------> checkout -> captured
+   webhook verified; unlock; ledger: creator +net (earnings), fee kept
 
- WHO PAYS WHOM : customer -> Promptly (₹50). Promptly -> creator's Linked Account (₹40) only via withdrawal.
- WHERE MONEY   : initially goes to the Promptly primary Razorpay account.
- CREATOR ELIGIBILITY : Razorpay Linked Account verified (KYC) -> payout_status eligible.
- SUCCESS PROOF: transfer.processed webhook (never the transfer-API accept).
- FAILURES     : transfer failed/reversed -> ledger reservation reversed -> retry.
+ CREATOR (Pro/Creator subscriber, saved UPI, NO KYC/PAN)
+ --------
+ Earnings: Total | Available | Withdrawn | (pending)
+    |
+    +-- Withdraw ₹50 --> gates: subscribed? UPI saved? min? balance? duplicate?
+                           --> payout(pending) + ledger debit (reserve)
+   ADMIN: lists pending -> transfers from ADMIN's UPI app -> mark PAID | FAILED
+   PAID  -> balances update, "Withdrawal successful"
+   FAILED-> ledger credit restores balance, retry allowed
+
+ WHO PAYS WHOM : user -> Promptly (₹49/99/mo, ₹50 per prompt). Creator paid from ADMIN's UPI.
+ WHERE MONEY   : subscriptions + purchases land in the Promptly Razorpay account.
+ ELIGIBILITY   : active Pro/Creator subscription + saved UPI ID (no PAN/bank/KYC).
+ SUCCESS PROOF : payout.status = paid set by admin AFTER the real UPI transfer.
+ FAILURES      : failed/duplicate/ineligible blocked by gates + ledger reversal.
 ```
