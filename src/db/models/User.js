@@ -36,6 +36,11 @@ const User = sequelize.define(
       allowNull: false,
       defaultValue: 'viewer',
     },
+    upiId: {
+      type: DataTypes.STRING,
+      allowNull: true, // saved on the profile; payouts snapshot it at request time
+      field: 'upi_id',
+    },
   },
   {
     tableName: 'users',

@@ -15,8 +15,8 @@ import {
  *   - 3 subscription plans (free / pro / creator)
  *   - 1 demo creator user
  *   - 5 prompts (free + paid mix) authored by the demo creator
- *   - a verified KYC + a bank account for the demo creator, so the manual-settle
- *     payout flow is testable (request → admin marks paid)
+ *   - a saved UPI ID for the demo creator, so the manual-settle payout flow is
+ *     testable (request → admin pays via UPI → admin marks paid)
  */
 
 const PLANS = [
@@ -148,7 +148,14 @@ async function main() {
   }
   console.log(`  ✅ ${PROMPTS.length} prompts`);
 
-  // 4. Demo creator KYC (verified) so the payout flow's KYC gate passes
+  // 4. Demo creator UPI ID (manual-settle destination — no KYC/bank needed).
+  //    findOrCreate won't touch an existing row, so update is used to make sure
+  //    a previously-seeded demo user also gets the UPI on re-seed.
+  await User.update({ upiId: 'demo@upi' }, { where: { email: DEMO_EMAIL } });
+  console.log('  ✅ demo creator UPI (demo@upi)');
+
+  // 5. Demo creator KYC (verified) — legacy; the payout flow no longer requires
+  //    KYC. Kept only so older screens/tests that read kycStatus still see it.
   await KycVerification.findOrCreate({
     where: { userId: creator.id },
     defaults: {
@@ -159,9 +166,9 @@ async function main() {
       verifiedAt: new Date(),
     },
   });
-  console.log('  ✅ demo creator KYC (verified)');
+  console.log('  ✅ demo creator KYC (verified, legacy)');
 
-  // 5. Demo creator bank account (manual-settle destination)
+  // 6. Demo creator bank account — legacy; manual settle now pays via UPI.
   await BankAccount.findOrCreate({
     where: { userId: creator.id },
     defaults: {
@@ -172,7 +179,7 @@ async function main() {
       accountNumberFull: '50100234567890', // TEST only — encrypt before prod
     },
   });
-  console.log('  ✅ demo creator bank account');
+  console.log('  ✅ demo creator bank account (legacy)');
 
   await sequelize.close();
   console.log('✅ Seed complete.');

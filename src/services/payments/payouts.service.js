@@ -1,4 +1,4 @@
-import { BankAccount, KycVerification, Payout } from '../../db/models.js';
+import { Payout, User } from '../../db/models.js';
 import { sequelize } from '../../db/config.js';
 import { writeLedger } from '../ledger.js';
 
@@ -8,20 +8,22 @@ import { writeLedger } from '../ledger.js';
  * ⚠️ RazorpayX Payouts (automatic bank transfer to a third party) is BUSINESS-
  * only — a solo individual can't get a payout route. So the flow is:
  *
- *   Creator balance ──(request, min ₹60)──► Payout row (pending)
- *        admin transfers ₹ via their OWN bank app  (NOT Razorpay)
+ *   Creator balance ──(request, min ₹60)──► Payout row (pending, upiId)
+ *        admin transfers ₹ to the creator's UPI via their OWN UPI app (NOT Razorpay)
  *        admin marks the payout paid/failed in the app
  *        creator sees "Processing → Paid" in My Account
  *
+ * No KYC and no bank account are required — the creator just saves a UPI ID on
+ * their profile (POST /me/upi), and the payout snapshots it at request time so
+ * a later UPI change never redirects a pending payment.
+ *
  * requestPayout({ userId, amountInr }):
- *   1. GATE: kyc_verifications.status === 'verified' (server-side, not just UI)
- *   2. GATE: an active bank_accounts row exists (the destination; full account
- *      number stored for the admin to transfer to — see BankAccount model)
- *   3. RULE: amountInr >= 60 (min withdrawal)
- *   4. RULE: amountInr <= available balance (ledger credits − debits) minus any
- *      amount already locked in a pending payout
- *   5. Writes a Payout row (status pending) + a ledger debit (type = payout) in
- *      one transaction, so the balance is reserved the moment the request lands.
+ *   1. GATE: user has a saved upi_id (the destination; POST /me/upi sets it)
+ *   2. RULE: amountInr >= 60 (min withdrawal)
+ *   3. RULE: amountInr <= available balance (ledger credits − debits)
+ *   4. Writes a Payout row (status pending, upiId snapshot) + a ledger debit
+ *      (type = payout) in one transaction, so the balance is reserved the
+ *      moment the request lands.
  *
  * Admin (solo = the developer): /admin/payouts lists pending, and
  * markPayoutPaid()/markPayoutFailed() flip status + processed_at after the
@@ -49,15 +51,9 @@ export async function requestPayout({ userId, amountInr }) {
     return err(400, `Minimum withdrawal is ₹${MIN_WITHDRAWAL_INR}`);
   }
 
-  const [kyc, bank] = await Promise.all([
-    KycVerification.findOne({ where: { userId } }),
-    BankAccount.findOne({ where: { userId, isActive: true }, order: [['createdAt', 'DESC']] }),
-  ]);
-  if (!kyc || kyc.status !== 'verified') {
-    return err(403, 'KYC must be verified before you can withdraw');
-  }
-  if (!bank) {
-    return err(400, 'Add a verified bank account before withdrawing');
+  const user = await User.findByPk(userId);
+  if (!user?.upiId) {
+    return err(400, 'Add your UPI ID on your profile before withdrawing');
   }
 
   const balance = await availableBalance(userId);
@@ -68,7 +64,7 @@ export async function requestPayout({ userId, amountInr }) {
   try {
     const payout = await sequelize.transaction(async (t) => {
       const created = await Payout.create(
-        { userId, amountInr, status: 'pending', bankAccountId: bank.id },
+        { userId, amountInr, status: 'pending', upiId: user.upiId },
         { transaction: t },
       );
       // Reserve the amount: a debit now, "paid" later is pure bookkeeping.
@@ -79,7 +75,7 @@ export async function requestPayout({ userId, amountInr }) {
           direction: 'debit',
           amountInr,
           refId: created.id,
-          note: `Withdrawal request (manual settle, pending)`,
+          note: 'Withdrawal request (manual settle via UPI, pending)',
         },
         t,
       );
@@ -91,6 +87,7 @@ export async function requestPayout({ userId, amountInr }) {
         id: payout.id,
         amountInr: payout.amountInr,
         status: payout.status,
+        upiId: payout.upiId,
         createdAt: payout.createdAt,
       },
     };
@@ -101,7 +98,8 @@ export async function requestPayout({ userId, amountInr }) {
 }
 
 /**
- * Admin — list payout requests with the transfer details the admin needs.
+ * Admin — list payout requests with the transfer details the admin needs
+ * (each row carries the UPI ID to pay to, plus the requesting user).
  * Not the endpoint a regular user calls; gate it with a real admin check
  * (this is dev: any authed user can hit it — document + lock before launch).
  * @returns {Promise<{ payouts: Payout[] }>}
@@ -114,7 +112,6 @@ export async function listPayouts({ status, limit = 50, offset = 0 } = {}) {
   const { rows, count } = await Payout.findAndCountAll({
     where,
     include: [
-      { association: 'bankAccount' },
       { association: 'user', attributes: ['id', 'fullName', 'email'] },
     ],
     order: [['createdAt', 'DESC']],

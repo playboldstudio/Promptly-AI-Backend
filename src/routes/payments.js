@@ -13,16 +13,19 @@ import { createSubscription } from '../services/payments/subscriptions.service.j
 
 const router = Router();
 
-// All payment routes require auth + Razorpay keys.
+// All payment routes require auth. Razorpay-keyed routes (checkout/subscriptions)
+// additionally require the keys; the manual-settle payout routes do NOT touch
+// Razorpay and must work even when the keys are unset.
 router.use(requireAuth);
-router.use((req, res, next) => {
+
+function requireRazorpayKeys(req, res, next) {
   if (!hasRazorpayKeys) {
     const err = new Error('Razorpay is not configured — set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET');
     err.status = 501;
     return next(err);
   }
   return next();
-});
+}
 
 const orderSchema = z.object({ promptId: z.string().uuid() });
 const verifySchema = z.object({
@@ -37,7 +40,7 @@ const verifySchema = z.object({
  * POST /payments/checkout/order — create a Razorpay order for a paid prompt.
  * Body: { promptId } → { orderId, amountInr, currency, feePercent, feeInr, netInr, prompt }
  */
-router.post('/checkout/order', async (req, res, next) => {
+router.post('/checkout/order', requireRazorpayKeys, async (req, res, next) => {
   try {
     const parsed = orderSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -62,7 +65,7 @@ router.post('/checkout/order', async (req, res, next) => {
  * POST /payments/checkout/verify — verify the payment + unlock the prompt.
  * Body: { promptId, orderId, paymentId, signature } (Razorpay Checkout success payload)
  */
-router.post('/checkout/verify', async (req, res, next) => {
+router.post('/checkout/verify', requireRazorpayKeys, async (req, res, next) => {
   try {
     const parsed = verifySchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -90,7 +93,7 @@ const subscriptionSchema = z.object({ planId: z.enum(['pro', 'creator']) });
  * Body: { planId: "pro" | "creator" } → { subscription: { razorpaySubId, shortUrl, ... } }
  * The app opens subscription.shortUrl to collect the first payment.
  */
-router.post('/subscriptions', async (req, res, next) => {
+router.post('/subscriptions', requireRazorpayKeys, async (req, res, next) => {
   try {
     const parsed = subscriptionSchema.safeParse(req.body ?? {});
     if (!parsed.success) {

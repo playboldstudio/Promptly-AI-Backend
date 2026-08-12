@@ -104,6 +104,6 @@ export async function getEarningsSummary(authorId) {
     salesCount,
     withdrawnInr,
     pendingPayouts,
-    balanceInr, // what the creator can withdraw (subject to min ₹60 + KYC)
+    balanceInr, // what the creator can withdraw (subject to min ₹60 + saved UPI)
   };
 }
