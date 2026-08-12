@@ -32,6 +32,9 @@ const envSchema = z.object({
   // Comma-separated emails allowed to use the admin endpoints
   // (/payments/admin/*: payout approval/back-office). Empty = admin disabled.
   ADMIN_EMAILS: z.string().optional().default(''),
+
+  // Payouts — minimum amount (rupees) a creator can withdraw (default ₹60).
+  MIN_WITHDRAWAL_INR: z.coerce.number().int().positive().default(60),
 });
 
 const parsed = envSchema.safeParse(process.env);

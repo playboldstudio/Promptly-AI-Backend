@@ -1,6 +1,7 @@
 import { Op } from 'sequelize';
 import { Payout, User, UserSubscription } from '../../db/models.js';
 import { sequelize } from '../../db/config.js';
+import { env } from '../../config/env.js';
 import { writeLedger } from '../ledger.js';
 
 /**
@@ -36,7 +37,8 @@ import { writeLedger } from '../ledger.js';
  * withdrawn, while pending.
  */
 
-const MIN_WITHDRAWAL_INR = 60;
+// Minimum withdrawable amount — configurable via MIN_WITHDRAWAL_INR env (₹60 default).
+const MIN_WITHDRAWAL_INR = env.MIN_WITHDRAWAL_INR;
 
 /** Return a 4xx-style error object, matching the other services' shape. */
 function err(status, message) {
