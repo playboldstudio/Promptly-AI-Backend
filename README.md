@@ -138,34 +138,21 @@ curl -s http://localhost:3000/me/transactions \
   -H 'Authorization: Bearer <token>'
 ```
 
-## Local vs live base URL
+## Live base URL
 
-The backend has **two** base URLs — local for testing, live for production — and
-both are defined in **one place**, `src/config/urls.js`:
+The backend uses exactly **one** API base URL — the live deployment. There is no
+local/test URL anymore. It's defined in **one place**, `src/config/urls.js`:
 
-| URL | Value | When |
-|---|---|---|
-| `BASE_URLS.local` | `http://localhost:3000` | `NODE_ENV` = development |
-| `BASE_URLS.live` | `PUBLIC_BASE_URL` env (default `https://promptly-ai-backend.onrender.com`) | `NODE_ENV` = production |
+| Constant | Value |
+|---|---|
+| `API_BASE_URL` | `PUBLIC_BASE_URL` env (default `https://promptly-ai-backend-svho.onrender.com`) |
 
-`getApiBaseUrl()` picks the right one automatically. CORS always allows both
-(local + live), plus anything in `CORS_ORIGINS` — so a browser frontend on
-`:8081` or `:5173` can call the local API during dev.
+CORS always allows the live URL, plus anything in `CORS_ORIGINS` (e.g. a web
+frontend dev server). Mobile apps don't send an Origin header and don't need CORS.
 
-**How the frontend switches:** the real toggle is an `API_BASE_URL` constant in
-your app (there's no frontend in this repo yet). The universal pattern is:
-
-```js
-const API_BASE_URL = __DEV__ ? 'http://localhost:3000' : 'https://promptly-ai-backend.onrender.com';
-```
-
-Per stack: Expo → `EXPO_PUBLIC_API_URL` in `.env.development`/`.env.production`;
-Vite/web → `VITE_API_URL`; Flutter → `--dart-define=API_BASE_URL=...`. Mobile
-apps don't need CORS at all.
-
-⚠️ **Android emulator** can't reach your machine via `localhost` — use
-`http://10.0.2.2:3000`. **Physical phone** → use your computer's LAN IP on the
-same Wi-Fi.
+The Android app points straight at the production API (its `BASE_URL` constant).
+Payments run against Razorpay **test keys** (`rzp_test_*`) for the initial stage;
+only the URL is live.
 
 ## Money model (Razorpay, live app)
 

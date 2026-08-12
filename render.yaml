@@ -30,7 +30,6 @@ services:
         sync: false
       - key: RAZORPAY_PLAN_CREATOR_ID
         sync: false
-      # The live API URL — matches the service name above. Change if you give
-      # the service a custom domain.
+      # The live API URL — matches the Render service name the app talks to.
       - key: PUBLIC_BASE_URL
-        value: https://promptly-ai-backend.onrender.com
+        value: https://promptly-ai-backend-svho.onrender.com
