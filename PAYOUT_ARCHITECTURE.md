@@ -11,6 +11,20 @@
 >
 > Companion to the repo README's "Money model" section.
 
+## Status
+
+| # | Work item | Sections | Status |
+|---|---|---|---|
+| 1 | Payout eligibility gates — Pro/Creator subscription, UPI, min, balance, single-active | §4, §6 | ✅ done |
+| 2 | Admin role gate on `/payments/admin/*` | §10, §11 | ⏳ pending |
+| 3 | Configurable `MIN_WITHDRAWAL_INR` + fee percent | §1, §6 | ⏳ pending |
+| 4 | Money-integrity fixes — verify `amountInr`, stop `save_count` bump on purchase, gate `promptText` on `/me/saved` | §5, §9 | ⏳ pending |
+| 5 | Android withdraw UI gating | §6 | ⏳ pending |
+| 6 | Android earnings/withdrawal status UI | §4, §12 | ⏳ pending |
+
+> ✅ = implemented and committed on `feature/razorpay-payouts` / `feature/ui-prototype`.
+> ⏳ = upcoming. Sections not in the table are live backend behavior already.
+
 ---
 
 ## Color legend

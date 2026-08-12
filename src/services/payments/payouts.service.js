@@ -1,4 +1,5 @@
-import { Payout, User } from '../../db/models.js';
+import { Op } from 'sequelize';
+import { Payout, User, UserSubscription } from '../../db/models.js';
 import { sequelize } from '../../db/config.js';
 import { writeLedger } from '../ledger.js';
 
@@ -18,10 +19,13 @@ import { writeLedger } from '../ledger.js';
  * a later UPI change never redirects a pending payment.
  *
  * requestPayout({ userId, amountInr }):
- *   1. GATE: user has a saved upi_id (the destination; POST /me/upi sets it)
- *   2. RULE: amountInr >= 60 (min withdrawal)
- *   3. RULE: amountInr <= available balance (ledger credits − debits)
- *   4. Writes a Payout row (status pending, upiId snapshot) + a ledger debit
+ *   1. GATE: user has an ACTIVE paid subscription (Pro/Creator) — payouts are
+ *      for subscribed creators only
+ *   2. GATE: user has a saved upi_id (the destination; POST /me/upi sets it)
+ *   3. GATE: no payout already pending/processing (one in-flight withdrawal)
+ *   4. RULE: amountInr >= min (MIN_WITHDRAWAL_INR, default ₹60)
+ *   5. RULE: amountInr <= available balance (ledger credits − debits)
+ *   6. Writes a Payout row (status pending, upiId snapshot) + a ledger debit
  *      (type = payout) in one transaction, so the balance is reserved the
  *      moment the request lands.
  *
@@ -52,8 +56,29 @@ export async function requestPayout({ userId, amountInr }) {
   }
 
   const user = await User.findByPk(userId);
+  if (!user) return err(404, 'User not found');
+
+  // GATE 1 — payouts are for subscribed creators (Pro/Creator) only.
+  const subscription = await UserSubscription.findOne({
+    where: { userId, status: 'active' },
+    include: [{ association: 'plan' }],
+  });
+  const planId = subscription?.plan?.id;
+  if (planId !== 'pro' && planId !== 'creator') {
+    return err(403, 'Subscriber only — upgrade to Pro or Creator before withdrawing');
+  }
+
+  // GATE 2 — the creator needs a saved UPI payout destination.
   if (!user?.upiId) {
     return err(400, 'Add your UPI ID on your profile before withdrawing');
+  }
+
+  // GATE 5 — one in-flight withdrawal at a time (idempotency).
+  const inFlight = await Payout.findOne({
+    where: { userId, status: { [Op.in]: ['pending', 'processing'] } },
+  });
+  if (inFlight) {
+    return err(409, 'You already have a withdrawal in progress — wait for it to settle');
   }
 
   const balance = await availableBalance(userId);
