@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
-import { hasRazorpayKeys } from '../config/env.js';
+import { hasRazorpayKeys, env } from '../config/env.js';
 import { createCheckoutOrder, verifyAndUnlock } from '../services/payments/checkout.service.js';
 import {
   requestPayout,
@@ -17,6 +17,23 @@ const router = Router();
 // additionally require the keys; the manual-settle payout routes do NOT touch
 // Razorpay and must work even when the keys are unset.
 router.use(requireAuth);
+
+// Admin back-office: only emails listed in ADMIN_EMAILS may approve/settle payouts.
+const adminEmails = new Set(
+  (env.ADMIN_EMAILS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+
+function requireAdmin(req, res, next) {
+  if (!req.user?.email || !adminEmails.has(req.user.email)) {
+    const err = new Error('Admin access required');
+    err.status = 403;
+    return next(err);
+  }
+  return next();
+}
 
 function requireRazorpayKeys(req, res, next) {
   if (!hasRazorpayKeys) {
@@ -158,7 +175,7 @@ router.post('/payouts', async (req, res, next) => {
  * GET /payments/admin/payouts?status=pending — list payout requests with the
  * bank details (full account number) needed to transfer.
  */
-router.get('/admin/payouts', async (req, res, next) => {
+router.get('/admin/payouts', requireAdmin, async (req, res, next) => {
   try {
     const { status } = req.query;
     const result = await listPayouts({ status, limit: req.query.limit, offset: req.query.offset });
@@ -172,7 +189,7 @@ router.get('/admin/payouts', async (req, res, next) => {
  * POST /payments/admin/payouts/:id/mark-paid — mark a payout paid after the
  * money has been transferred manually.
  */
-router.post('/admin/payouts/:id/mark-paid', async (req, res, next) => {
+router.post('/admin/payouts/:id/mark-paid', requireAdmin, async (req, res, next) => {
   try {
     const result = await markPayoutPaid({ payoutId: req.params.id });
     if (result.error) {
@@ -191,7 +208,7 @@ router.post('/admin/payouts/:id/mark-paid', async (req, res, next) => {
  * POST /payments/admin/payouts/:id/mark-failed — mark a payout failed; the
  * reserved balance is returned to the creator.
  */
-router.post('/admin/payouts/:id/mark-failed', async (req, res, next) => {
+router.post('/admin/payouts/:id/mark-failed', requireAdmin, async (req, res, next) => {
   try {
     const result = await markPayoutFailed({
       payoutId: req.params.id,

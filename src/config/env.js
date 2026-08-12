@@ -28,6 +28,10 @@ const envSchema = z.object({
   // Extra browser origins CORS should accept (comma-separated), e.g. a web
   // frontend dev server. The live API URL is always allowed.
   CORS_ORIGINS: z.string().optional().default(''),
+
+  // Comma-separated emails allowed to use the admin endpoints
+  // (/payments/admin/*: payout approval/back-office). Empty = admin disabled.
+  ADMIN_EMAILS: z.string().optional().default(''),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -113,7 +113,7 @@ local server, which is handy for debugging webhooks against your dev environment
 | POST | `/payments/checkout/verify` | ✅ | Verify the payment + unlock. Body = Razorpay Checkout success payload `{ promptId, orderId, paymentId, signature }`. Writes the purchase + ledger. |
 | POST | `/payments/subscriptions` | ✅ | Create a Razorpay subscription. Body `{ planId: "pro" | "creator" }` → `{ subscription: { razorpaySubId, shortUrl, … } }`. The app opens `shortUrl` to collect the first payment. |
 | POST | `/payments/payouts` | ✅ | Request a withdrawal (**manual settle**, min ₹60). Body `{ amountInr }`. Requires verified KYC + bank account; reserves the balance as `pending`. |
-| GET | `/payments/admin/payouts` | ✅ | **Admin (solo dev).** List payout requests with full bank details. `?status=pending`. ⚠️ not role-gated — dev only. |
+| GET | `/payments/admin/payouts` | ✅ + admin | **Admin.** List payout requests with full bank details. `?status=pending`. Requires `ADMIN_EMAILS` (403 otherwise). |
 | POST | `/payments/admin/payouts/:id/mark-paid` | ✅ | **Admin.** Mark a pending payout `paid` after you've transferred the money. |
 | POST | `/payments/admin/payouts/:id/mark-failed` | ✅ | **Admin.** Mark a payout `failed`; the reserved balance is returned to the creator. |
 | POST | `/webhooks/razorpay` | signature | Verify `X-Razorpay-Signature` (HMAC), log idempotently to `webhook_events` (unique `dedupe_key`), dispatch `subscription.charged` / `.cancelled` / `.expired`. |
@@ -240,8 +240,7 @@ src/
 ## Roadmap / not yet built
 
 - Real Firebase/Supabase auth (`src/middleware/auth.js` + `src/routes/auth.js` are the swap points)
-- **Admin role gating** — the `/payments/admin/*` endpoints currently trust any signed-in
-  user. Add a real admin check before launch.
+- **Admin role gating** — `/payments/admin/*` is now gated by `ADMIN_EMAILS` (403 for others).
 - Refund flow (`prompt_purchases.status = 'refunded'` → reverse ledger rows)
 - **Encrypt** `bank_accounts.account_number_full` (and the KYC `pan`) — plaintext today, test-mode only
 - RazorpayX Payouts — only if/when you register a **business** account; the manual-settle
