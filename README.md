@@ -57,6 +57,42 @@ npm run dev                # http://localhost:3000
 > ⚠️ `db:sync` is a dev convenience. Before production, adopt real migrations
 > (`sequelize-cli`) so schema changes are versioned and safe on a live database.
 
+## Deploy on Render
+
+This repo ships a `render.yaml` blueprint — one-click deploy:
+
+1. **Push this repo to GitHub** (done — `origin` is set).
+2. Render dashboard → **New → Blueprint** → connect the repo → **Apply**.
+   (`render blueprint launch` works too if you use the Render CLI.)
+3. In the new service → **Environment**, set the secrets (marked `sync: false` in
+   the blueprint so they never live in the repo):
+   - `DATABASE_URL` — the same Neon connection string as local
+   - `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`
+   - `RAZORPAY_WEBHOOK_SECRET` — **use a real secret**, not the dev placeholder
+   - `RAZORPAY_PLAN_PRO_ID`, `RAZORPAY_PLAN_CREATOR_ID`
+   - `PUBLIC_BASE_URL` is pre-set to `https://promptly-ai-backend.onrender.com`
+   - Do **not** set `PORT` — Render injects its own.
+4. Deploy. The health check (`/health`) runs automatically.
+
+**One-time DB setup:** your Neon DB is already synced + seeded from local dev, so
+nothing to do. If you ever point this at a fresh database, run once from the
+Render **Shell** tab (or locally against the same DB):
+
+```bash
+npm run db:sync
+npm run db:seed
+```
+
+**After deploy:** point Razorpay's webhook at `https://<service>.onrender.com/webhooks/razorpay`.
+In **test mode** you can use a tunnel (ngrok / cloudflared) to forward to your
+local server, which is handy for debugging webhooks against your dev environment.
+
+**Notes for Render**
+- Free tier spins down after ~15 min idle; the first hit after idle is a cold
+  start. Webhooks stay safe because the handler is idempotent (Razorpay retries,
+  and a duplicate delivery is a no-op).
+- Swap `rzp_test_*` → `rzp_live_*` and set a real webhook secret before real money.
+
 ## API surface (current)
 
 | Method | Path | Auth | Description |
@@ -101,6 +137,35 @@ curl -s http://localhost:3000/prompts?sort=trending
 curl -s http://localhost:3000/me/transactions \
   -H 'Authorization: Bearer <token>'
 ```
+
+## Local vs live base URL
+
+The backend has **two** base URLs — local for testing, live for production — and
+both are defined in **one place**, `src/config/urls.js`:
+
+| URL | Value | When |
+|---|---|---|
+| `BASE_URLS.local` | `http://localhost:3000` | `NODE_ENV` = development |
+| `BASE_URLS.live` | `PUBLIC_BASE_URL` env (default `https://promptly-ai-backend.onrender.com`) | `NODE_ENV` = production |
+
+`getApiBaseUrl()` picks the right one automatically. CORS always allows both
+(local + live), plus anything in `CORS_ORIGINS` — so a browser frontend on
+`:8081` or `:5173` can call the local API during dev.
+
+**How the frontend switches:** the real toggle is an `API_BASE_URL` constant in
+your app (there's no frontend in this repo yet). The universal pattern is:
+
+```js
+const API_BASE_URL = __DEV__ ? 'http://localhost:3000' : 'https://promptly-ai-backend.onrender.com';
+```
+
+Per stack: Expo → `EXPO_PUBLIC_API_URL` in `.env.development`/`.env.production`;
+Vite/web → `VITE_API_URL`; Flutter → `--dart-define=API_BASE_URL=...`. Mobile
+apps don't need CORS at all.
+
+⚠️ **Android emulator** can't reach your machine via `localhost` — use
+`http://10.0.2.2:3000`. **Physical phone** → use your computer's LAN IP on the
+same Wi-Fi.
 
 ## Money model (Razorpay, live app)
 

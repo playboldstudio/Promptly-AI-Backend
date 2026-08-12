@@ -12,12 +12,25 @@ import webhooksRouter from './routes/webhooks.js';
 import { notFound } from './middleware/notFound.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { env } from './config/env.js';
+import { allowedOrigins } from './config/urls.js';
 
 export function createApp() {
   const app = express();
 
   app.use(helmet());
-  app.use(cors());
+  // CORS — open in development (any local origin can test), locked to the
+  // known origins (local + live + CORS_ORIGINS) in production. Mobile apps
+  // and curl send no Origin header and are always allowed.
+  const origins = allowedOrigins();
+  const allowAll = env.NODE_ENV !== 'production';
+  app.use(
+    cors({
+      origin(origin, cb) {
+        if (!origin) return cb(null, true); // non-browser caller
+        cb(null, allowAll || origins.has(origin));
+      },
+    }),
+  );
   app.use(morgan(env.NODE_ENV === 'development' ? 'dev' : 'combined'));
 
   // Webhook route needs the RAW body for Razorpay signature verification (HMAC).

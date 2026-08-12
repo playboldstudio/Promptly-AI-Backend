@@ -21,6 +21,13 @@ const envSchema = z.object({
   // plan id, so the app creates subscriptions with the correct billing plan.
   RAZORPAY_PLAN_PRO_ID: z.string().optional().default(''),
   RAZORPAY_PLAN_CREATOR_ID: z.string().optional().default(''),
+
+  // Deploy / URLs — see src/config/urls.js for the local vs live switch.
+  // PUBLIC_BASE_URL is the live API URL (defaults to the Render service name).
+  PUBLIC_BASE_URL: z.string().optional().default(''),
+  // Extra browser origins CORS should accept (comma-separated), e.g. the frontend
+  // dev server http://localhost:8081. Localhost:3000 + the live URL are always allowed.
+  CORS_ORIGINS: z.string().optional().default(''),
 });
 
 const parsed = envSchema.safeParse(process.env);
