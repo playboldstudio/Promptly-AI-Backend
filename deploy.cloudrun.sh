@@ -39,7 +39,7 @@ gcloud run deploy "$SERVICE" \
   --allow-unauthenticated \
   --min-instances 0 \
   --max-instances 5 \
-  --set-env-vars "NODE_ENV=production" \
+  --set-env-vars "NODE_ENV=production,FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-}" \
   --set-secrets \
     "RAZORPAY_KEY_ID=razorpay-key-id:latest,RAZORPAY_KEY_SECRET=razorpay-key-secret:latest,RAZORPAY_WEBHOOK_SECRET=razorpay-webhook-secret:latest,FIREBASE_CLIENT_EMAIL=firebase-client-email:latest,FIREBASE_PRIVATE_KEY=firebase-private-key:latest,RAZORPAY_PLAN_PRO_ID=razorpay-plan-pro:latest,RAZORPAY_PLAN_CREATOR_ID=razorpay-plan-creator:latest"
 

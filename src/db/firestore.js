@@ -53,7 +53,7 @@ try {
 }
 
 /** Firestore database instance (datastore/emulator-friendly). */
-export const db = getFirestore(app);
+export const db = getFirestore(app, env.FIRESTORE_DATABASE || undefined);
 
 /** Firebase Authentication admin SDK — verifies client ID tokens. */
 export const firebaseAuth = getAuth(app);

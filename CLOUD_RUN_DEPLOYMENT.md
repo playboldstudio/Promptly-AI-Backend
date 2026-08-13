@@ -101,6 +101,7 @@ Set these on the Cloud Run service (recommended: sensitive ones via Secret Manag
 | `PORT` | no | injected by Cloud Run (8080 default) |
 | `NODE_ENV` | no | `production` |
 | `FIREBASE_PROJECT_ID` | no | GCP project id |
+| `FIRESTORE_DATABASE` | no | Firestore database id — set to your named database if you created one (e.g. `promptly-ai`); empty = `(default)` |
 | `FIREBASE_CLIENT_EMAIL` | yes | service-account email |
 | `FIREBASE_PRIVATE_KEY` | yes | service-account private key (`\\n` escaped) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | alt | path to mounted SA JSON instead |

@@ -11,6 +11,9 @@ const envSchema = z.object({
 
   // Firebase / Firestore — the datastore. FIREBASE_PROJECT_ID is required.
   FIREBASE_PROJECT_ID: z.string().min(1, 'FIREBASE_PROJECT_ID is required'),
+  // Optional — Firestore database id. Defaults to the "(default)" database.
+  // Set to your named database (e.g. "promptly-ai") if you created one.
+  FIRESTORE_DATABASE: z.string().optional().default(''),
   // Service-account (optional — if unset, ADC / Cloud Run default SA is used).
   FIREBASE_CLIENT_EMAIL: z.string().optional().default(''),
   FIREBASE_PRIVATE_KEY: z.string().optional().default(''),
