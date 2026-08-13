@@ -1,7 +1,8 @@
-import { Prompt, PromptPurchase, UserSubscription } from '../../db/models.js';
-import { sequelize } from '../../db/config.js';
+import { COLS, findByPk, inTxGet, inTxSet } from '../../db/firestoreRepo.js';
+import { runTransaction } from '../../db/config.js';
 import { razorpay, verifyPaymentSignature } from '../../lib/razorpay.js';
 import { writeLedger } from '../ledger.js';
+import { currentActiveSubscriptionWithPlan } from './_subs.js';
 
 /**
  * PAID PROMPT SALES — Razorpay Checkout into the platform's account.
@@ -17,9 +18,9 @@ import { writeLedger } from '../ledger.js';
  *   2. The app sends the payment response back → POST /payments/checkout/verify
  *        - verifies the Razorpay payment_signature (HMAC, server-side)
  *        - double-checks the captured amount matches the order
- *        - unlockPrompt() writes the PromptPurchase + ledger rows
+ *        - unlockPrompt() writes the PromptPurchase + ledger rows (Firestore tx)
  *
- * All money is integer rupees. `net_inr` is frozen at sale time so historical
+ * All money is integer rupees. `netInr` is frozen at sale time so historical
  * accuracy survives fee changes.
  */
 
@@ -28,12 +29,17 @@ function inPaise(rupees) {
   return Math.round(rupees * 100);
 }
 
+/** Deterministic doc id for a purchase — enforces one-unlock-per-buyer-per-prompt. */
+function purchaseIdFor(buyerId, promptId) {
+  return `${buyerId}_${promptId}`;
+}
+
 /**
  * Phase 1 — create a Razorpay order for a paid prompt.
  * @returns {{ orderId, amountInr, currency, feePercent, feeInr, netInr, prompt }}
  */
 export async function createCheckoutOrder({ buyerId, promptId }) {
-  const prompt = await Prompt.findByPk(promptId);
+  const prompt = await findByPk(COLS.prompts, promptId);
   if (!prompt || prompt.status !== 'published') {
     return { error: { status: 404, message: 'Prompt not found' } };
   }
@@ -42,23 +48,20 @@ export async function createCheckoutOrder({ buyerId, promptId }) {
   }
 
   // One unlock per buyer per prompt — reject if already purchased.
-  const existing = await PromptPurchase.findOne({ where: { buyerId, promptId } });
+  const existing = await findByPk(COLS.promptPurchases, purchaseIdFor(buyerId, promptId));
   if (existing) {
     return { error: { status: 409, message: 'You already own this prompt' } };
   }
 
   // Platform fee % from the BUYER's current subscription (Pro=5%, Creator=0%).
-  const subscription = await UserSubscription.findOne({
-    where: { userId: buyerId, status: 'active' },
-    include: [{ association: 'plan' }],
-  });
-  const feePercent = subscription?.plan?.platformFeePercent ?? 0;
+  const sub = await currentActiveSubscriptionWithPlan(buyerId);
+  const feePercent = sub?.plan?.platformFeePercent ?? 0;
 
   const priceInr = prompt.priceInr;
   const feeInr = Math.round((priceInr * feePercent) / 100);
   const netInr = priceInr - feeInr;
 
-  const order = await razorpay.orders.create({
+  const order = await razorpay().orders.create({
     amount: inPaise(priceInr),
     currency: 'INR',
     receipt: `prompt_${promptId}`,
@@ -97,7 +100,7 @@ export async function verifyAndUnlock({
     return { error: { status: 400, message: 'Invalid payment signature' } };
   }
 
-  const prompt = await Prompt.findByPk(promptId);
+  const prompt = await findByPk(COLS.prompts, promptId);
   if (!prompt) return { error: { status: 404, message: 'Prompt not found' } };
 
   // Money integrity — never trust the client for the amount. Bind this payment
@@ -106,8 +109,8 @@ export async function verifyAndUnlock({
   // 2) the order amount equals the prompt price
   // 3) the payment is captured and its amount equals the order amount
   const [order, payment] = await Promise.all([
-    razorpay.orders.fetch(orderId).catch(() => null),
-    razorpay.payments.fetch(paymentId).catch(() => null),
+    razorpay().orders.fetch(orderId).catch(() => null),
+    razorpay().payments.fetch(paymentId).catch(() => null),
   ]);
 
   if (
@@ -133,77 +136,81 @@ export async function verifyAndUnlock({
 
 /**
  * Write the PromptPurchase + ledger rows for a completed sale.
- * Wrapped in a transaction so money rows are all-or-nothing.
+ * Wrapped in a Firestore transaction so money rows are all-or-nothing.
  */
 async function unlockPrompt({ buyerId, promptId, orderId, paymentId, priceInr }) {
-  const prompt = await Prompt.findByPk(promptId);
+  const prompt = await findByPk(COLS.prompts, promptId);
   if (!prompt) return { error: { status: 404, message: 'Prompt not found' } };
-
-  const existing = await PromptPurchase.findOne({ where: { buyerId, promptId } });
-  if (existing) {
-    return { error: { status: 409, message: 'You already own this prompt' } };
-  }
 
   // Prevents a caller from passing a made-up price while paying the real amount.
   if (Math.round(Number(priceInr)) !== prompt.priceInr) {
     return { error: { status: 400, message: 'Price does not match the prompt price' } };
   }
 
-  // Recompute the financial snapshot from the *current* buyer fee.
-  const subscription = await UserSubscription.findOne({
-    where: { userId: buyerId, status: 'active' },
-    include: [{ association: 'plan' }],
-  });
-  const feePercent = subscription?.plan?.platformFeePercent ?? 0;
-  const feeInr = Math.round((priceInr * feePercent) / 100);
-  const netInr = priceInr - feeInr;
-
   try {
-    await sequelize.transaction(async (t) => {
-      const purchase = await PromptPurchase.create(
-        {
-          buyerId,
-          promptId,
-          authorId: prompt.authorId,
-          priceInr,
-          platformFeeInr: feeInr,
-          netInr,
-          razorpayPaymentId: paymentId,
-          status: 'completed',
-        },
-        { transaction: t },
-      );
+    const purchaseId = purchaseIdFor(buyerId, promptId);
+    await runTransaction(async (tx) => {
+      const existing = await inTxGet(tx, COLS.promptPurchases, purchaseId);
+      if (existing) {
+        throw Object.assign(new Error('already-owns'), { alreadyOwns: true });
+      }
+
+      // Recompute the financial snapshot from the *current* buyer fee.
+      const sub = await currentActiveSubscriptionWithPlan(buyerId);
+      const feePercent = sub?.plan?.platformFeePercent ?? 0;
+      const feeInr = Math.round((priceInr * feePercent) / 100);
+      const netInr = priceInr - feeInr;
+
+      // The purchase row (deterministic id guarantees one-per-buyer-per-prompt).
+      inTxSet(tx, COLS.promptPurchases, purchaseId, {
+        buyerId,
+        promptId,
+        authorId: prompt.authorId ?? null,
+        priceInr,
+        platformFeeInr: feeInr,
+        netInr,
+        razorpayPaymentId: paymentId,
+        razorpayOrderId: orderId ?? null,
+        status: 'completed',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
 
       // Ledger — credit the creator with the net amount.
       await writeLedger(
+        tx,
         {
           userId: prompt.authorId,
           type: 'paid_prompt_sale',
           direction: 'credit',
           amountInr: netInr,
-          refId: purchase.id,
+          refId: purchaseId,
           note: `Sale of "${prompt.title}"`,
         },
-        t,
       );
 
       // Ledger — debit the buyer by the price paid.
       await writeLedger(
+        tx,
         {
           userId: buyerId,
           type: 'paid_prompt_sale',
           direction: 'debit',
           amountInr: priceInr,
-          refId: purchase.id,
+          refId: purchaseId,
           note: `Unlocked "${prompt.title}"`,
         },
-        t,
       );
     });
 
-    return { success: true, unlocked: true, promptId, paymentId, orderId };
+    // After a successful tx, recompute the buyer's active subscription fee is
+    // stable; return the purchase id as the ref for auditing.
+    return { success: true, unlocked: true, promptId, purchaseId, paymentId, orderId };
   } catch (err) {
-    if (err.name === 'SequelizeUniqueConstraintError') {
+    if (err.alreadyOwns) {
+      return { error: { status: 409, message: 'You already own this prompt' } };
+    }
+    if (/ABORTED|already exists/i.test(err.message)) {
       return { error: { status: 409, message: 'You already own this prompt' } };
     }
     throw err;

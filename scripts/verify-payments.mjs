@@ -8,7 +8,7 @@
 import crypto from 'node:crypto';
 import 'dotenv/config';
 
-const BASE = 'http://localhost:3000';
+const BASE = 'http://localhost:8080';
 const WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
 
 async function req(method, path, { token, body } = {}) {

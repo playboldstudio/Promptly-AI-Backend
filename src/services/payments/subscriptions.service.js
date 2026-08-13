@@ -1,5 +1,5 @@
-import { SubscriptionPlan, UserSubscription } from '../../db/models.js';
-import { sequelize } from '../../db/config.js';
+import { COLS, findByPk, queryAll, inTxGet, inTxSet, update } from '../../db/firestoreRepo.js';
+import { runTransaction } from '../../db/config.js';
 import { razorpay } from '../../lib/razorpay.js';
 import { razorpayPlanIdFor } from '../../config/env.js';
 import { writeLedger } from '../ledger.js';
@@ -14,12 +14,15 @@ import { writeLedger } from '../ledger.js';
  *        - maps our plan id → the Razorpay plan id created in the dashboard
  *        - calls Razorpay Subscriptions API → a checkout URL for the app to open
  *   2. User pays → webhook `subscription.charged` → activateSubscription():
- *        - writes/updates the `UserSubscription` row (status active, period dates)
+ *        - writes/updates the `user_subscriptions` row (status active, period dates)
  *        - debits the ledger (type = subscription_payment, ref_id = sub id)
  *        - idempotent — replays can't double-charge (guarded by webhook dispatch)
  *   3. Renewals → `subscription.charged` again → current_period_end rolls forward.
  *   4. Cancel / expiry → `subscription.cancelled` / `subscription.expired`
  *        → status = cancelled/expired + cancelled_at.
+ *
+ * The user_subscriptions doc id IS the Razorpay subscription id, so a renewal
+ * upserts the same doc (rolls the period forward) instead of leaking rows.
  *
  * All money is integer rupees.
  */
@@ -36,7 +39,7 @@ function err(status, message) {
  * @returns {{ razorpaySubId, planId, planName, priceInr, currency, totalCount, interval, notes, customer, expireBy } | {error}}
  */
 export async function createSubscription({ userId, planId, customerDetails }) {
-  const plan = await SubscriptionPlan.findByPk(planId);
+  const plan = await findByPk(COLS.subscriptionPlans, planId);
   if (!plan || !plan.isActive || !plan.priceInr) {
     return err(404, 'Plan not found');
   }
@@ -46,8 +49,12 @@ export async function createSubscription({ userId, planId, customerDetails }) {
 
   // One active subscription per user. A user on Pro who upgrades to Creator
   // should cancel the old one first (the UI can offer that as a separate flow).
-  const existing = await UserSubscription.findOne({ where: { userId, status: 'active' } });
-  if (existing) {
+  const existing = await queryAll({
+    collection: COLS.userSubscriptions,
+    filters: [{ field: 'userId', value: userId }, { field: 'status', value: 'active' }],
+    limit: 1,
+  });
+  if (existing.rows.length) {
     return err(409, 'You already have an active subscription');
   }
 
@@ -60,7 +67,7 @@ export async function createSubscription({ userId, planId, customerDetails }) {
   }
 
   const periodEnd = Date.now() + PERIOD_MONTH_MS;
-  const subscription = await razorpay.subscriptions.create({
+  const subscription = await razorpay().subscriptions.create({
     plan_id: razorpayPlanId,
     total_count: 12, // renews monthly; webhook charges each cycle
     quantity: 1,
@@ -95,54 +102,50 @@ export async function activateSubscription(sub) {
   if (!userId) return; // seeded/historical subs without notes — nothing to wire
 
   const planId = planIdFromRazorpayPlan(sub.plan_id);
-  if (!planId) {
-    // Plan removed from dashboard — still record the row so history is honest.
-    // (plan_id FK is enforced, so skip writing rather than crash the webhook.)
-    return;
-  }
+  if (!planId) return; // plan removed from dashboard — nothing to wire
 
   const periodStart = new Date(sub.current_start * 1000);
   const periodEnd = new Date(sub.current_end * 1000);
 
-  // Sub rows only get razorpay_sub_id after the user actually pays (Razorpay
-  // returns it in subscription.charged). If one already exists, reuse it so we
-  // don't leak rows on every renewal.
-  const existing = await UserSubscription.findOne({ where: { razorpaySubId: sub.id } });
+  await runTransaction(async (tx) => {
+    const plan = await findByPk(COLS.subscriptionPlans, planId);
+    const docId = `sub_${sub.id}`;
+    const existing = await inTxGet(tx, COLS.userSubscriptions, docId);
 
-  await sequelize.transaction(async (t) => {
     if (existing) {
-      // Renewal — roll current_period_* forward; status stays active.
-      await existing.update(
-        { currentPeriodStart: periodStart, currentPeriodEnd: periodEnd, status: 'active' },
-        { transaction: t },
-      );
-    } else {
-      await UserSubscription.create(
-        {
-          userId,
-          planId,
-          razorpaySubId: sub.id,
-          status: 'active',
-          currentPeriodStart: periodStart,
-          currentPeriodEnd: periodEnd,
-        },
-        { transaction: t },
-      );
+      // Renewal — roll current_period_* forward on the same doc; status stays active.
+      inTxSet(tx, COLS.userSubscriptions, docId, {
+        currentPeriodStart: periodStart,
+        currentPeriodEnd: periodEnd,
+        status: 'active',
+        updatedAt: new Date(),
+      });
+      return;
     }
 
-    // Ledger — the user pays the platform for the plan (a debit on their balance).
-    const plan = await SubscriptionPlan.findByPk(planId);
+    inTxSet(tx, COLS.userSubscriptions, docId, {
+      userId,
+      planId,
+      razorpaySubId: sub.id,
+      status: 'active',
+      currentPeriodStart: periodStart,
+      currentPeriodEnd: periodEnd,
+      cancelledAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
     if (plan?.priceInr) {
       await writeLedger(
+        tx,
         {
           userId,
           type: 'subscription_payment',
           direction: 'debit',
           amountInr: plan.priceInr,
-          refId: sub.id,
+          refId: docId,
           note: `Subscription — ${plan.name} (₹${plan.priceInr}/month)`,
         },
-        t,
       );
     }
   });
@@ -152,15 +155,18 @@ export async function activateSubscription(sub) {
  * Handle `subscription.cancelled` / `subscription.expired` webhooks.
  */
 export async function deactivateSubscription(sub) {
-  const [row] = await UserSubscription.findAll({
-    where: { razorpaySubId: sub.id, status: 'active' },
-    order: [['createdAt', 'DESC']],
+  const rows = await queryAll({
+    collection: COLS.userSubscriptions,
+    filters: [{ field: 'razorpaySubId', value: sub.id }, { field: 'status', value: 'active' }],
+    orderBy: { field: 'createdAt', direction: 'desc' },
     limit: 1,
   });
+  const row = rows.rows[0];
   if (!row) return;
-  await row.update({
+  await update(COLS.userSubscriptions, row.id, {
     status: sub.status === 'cancelled' ? 'cancelled' : 'expired',
     cancelledAt: new Date(),
+    updatedAt: new Date(),
   });
 }
 

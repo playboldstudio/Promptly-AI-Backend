@@ -3,11 +3,13 @@ import { env } from './env.js';
 /**
  * The single, always-live API base URL.
  *
- * The local/testing URL has been removed — everything points at the live
- * deployment. `PUBLIC_BASE_URL` (Render env) overrides the default service URL.
+ * On Cloud Run this is your assigned HTTPS URL, e.g.
+ * `https://<service>-<hash>.run.app`. Set it via the `PUBLIC_BASE_URL` env var
+ * (Cloud Run) so the Android/Web client and CORS allow-list it. The fallback
+ * below is only a placeholder so local dev boots without it.
  */
 export const API_BASE_URL =
-  env.PUBLIC_BASE_URL || 'https://promptly-ai-backend-svho.onrender.com';
+  env.PUBLIC_BASE_URL || 'http://localhost:8080';
 
 /**
  * Browser origins CORS accepts — the live URL plus anything in `CORS_ORIGINS`

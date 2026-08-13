@@ -1,18 +1,22 @@
-import { User } from '../db/models.js';
+import { firebaseAuth } from '../db/firestore.js';
+import { COLS, findByPk, upsert } from '../db/firestoreRepo.js';
+import { env } from '../config/env.js';
 
 /**
- * Dev authentication: `Authorization: Bearer <userId>`.
+ * Firebase Authentication middleware.
  *
- * ⚠️ DEV ONLY. The token is just the user's id — no signing, no expiry.
- * This is the swap point for real auth (Firebase Auth / Supabase Auth / phone OTP):
- * verify the Bearer token against the provider, resolve `authProviderId` → user,
- * and attach the same `req.user`.
+ * The client signs in with Firebase Auth (Android/Web) and sends the resulting
+ * ID token as `Authorization: Bearer <token>`. We verify it with the Admin SDK
+ * (the JWT's signature, expiry and audience are all checked server-side), then
+ * resolve the Firebase UID → the user's Firestore doc, lazily creating/refreshing
+ * it from the token's claims (uid, email, name, photo). Never trust a raw UID
+ * from the client.
  *
- * Attaches `req.user` (full User row) and `req.userId` on success.
- * Throws 401 when the header is missing, the token isn't a valid UUID, or the user
- * doesn't exist.
+ * In development only, the legacy dev token (a bare user id) is also accepted
+ * so local/emulator work keeps working without a Firebase sign-in.
+ *
+ * Attaches `req.user` (user doc) and `req.userId` (the Firestore doc id = uid).
  */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function unauthorized(next, message) {
   const err = new Error(message);
@@ -20,30 +24,73 @@ function unauthorized(next, message) {
   return next(err);
 }
 
-/** Dev tokens are user UUIDs. Anything else fails fast instead of hitting Postgres. */
-function isValidToken(token) {
-  return Boolean(token) && UUID_RE.test(token);
+/** Legacy dev token: a bare UUID. Accepted only outside production. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Verify a Bearer token and resolve the user doc.
+ * Returns { user, userId } on success, or throws { status: 401 }.
+ */
+async function resolveUser(token) {
+  if (!token) {
+    const e = new Error('Authentication required — send Authorization: Bearer <token>');
+    e.status = 401;
+    throw e;
+  }
+
+  // Production: only signed Firebase ID tokens are accepted.
+  if (env.NODE_ENV === 'production') {
+    return verifyFirebaseToken(token);
+  }
+
+  // Development convenience: legacy bare-user-id token.
+  if (UUID_RE.test(token)) {
+    const user = await findByPk(COLS.users, token);
+    if (!user) {
+      const e = new Error('Invalid or unknown auth token');
+      e.status = 401;
+      throw e;
+    }
+    return { user, userId: user.id };
+  }
+
+  return verifyFirebaseToken(token);
+}
+
+async function verifyFirebaseToken(token) {
+  try {
+    const decoded = await firebaseAuth.verifyIdToken(token, true);
+    const uid = decoded.uid;
+
+    // Lazy upsert / refresh the user doc from the verified token claims.
+    const existing = await findByPk(COLS.users, uid);
+    const patch = {
+      authProviderId: uid,
+      email: decoded.email ?? existing?.email ?? '',
+      fullName:
+        decoded.name ?? decoded.displayName ?? existing?.fullName ?? decoded.email?.split('@')[0] ?? 'User',
+      avatarUrl: decoded.picture ?? decoded.photoURL ?? existing?.avatarUrl ?? null,
+      updatedAt: new Date(),
+    };
+    if (!existing) patch.createdAt = new Date();
+    await upsert(COLS.users, uid, patch);
+
+    const user = await findByPk(COLS.users, uid);
+    return { user, userId: uid };
+  } catch (err) {
+    const e = new Error('Invalid or expired auth token');
+    e.status = 401;
+    throw e;
+  }
 }
 
 export async function requireAuth(req, _res, next) {
   try {
     const header = req.headers.authorization ?? '';
     const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : '';
-
-    if (!token) {
-      return unauthorized(next, 'Authentication required — send Authorization: Bearer <userId>');
-    }
-    if (!isValidToken(token)) {
-      return unauthorized(next, 'Invalid auth token');
-    }
-
-    const user = await User.findByPk(token);
-    if (!user) {
-      return unauthorized(next, 'Invalid or unknown auth token');
-    }
-
+    const { user, userId } = await resolveUser(token);
     req.user = user;
-    req.userId = user.id;
+    req.userId = userId;
     return next();
   } catch (err) {
     return next(err);
@@ -53,21 +100,23 @@ export async function requireAuth(req, _res, next) {
 /**
  * Optional auth — attaches req.user when a valid Bearer token is present,
  * otherwise continues as anonymous. Used by prompt detail (paid prompts unlock
- * only for signed-in users).
+ * only for signed-in users). Invalid tokens are treated as anonymous here.
  */
 export async function optionalAuth(req, _res, next) {
   try {
     const header = req.headers.authorization ?? '';
     const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : '';
-    if (token && isValidToken(token)) {
-      const user = await User.findByPk(token);
-      if (user) {
+    if (token) {
+      try {
+        const { user, userId } = await resolveUser(token);
         req.user = user;
-        req.userId = user.id;
+        req.userId = userId;
+      } catch {
+        // ignore — anonymous
       }
     }
     return next();
-  } catch (err) {
-    return next(err);
+  } catch {
+    return next();
   }
 }

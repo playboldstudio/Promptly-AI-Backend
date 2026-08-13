@@ -1,34 +1,43 @@
-import { Sequelize } from 'sequelize';
-import { env } from '../config/env.js';
+import { db } from './firestore.js';
+import { COLS } from './firestoreRepo.js';
 
 /**
- * Sequelize instance — the single connection pool for the whole app.
+ * Firestore data access entry point (replaces the Sequelize/Postgres setup).
  *
- * The connection string is a full postgres:// URL from .env (Neon/Supabase/RDS).
- * `ssl` is only applied when the URL requests it (sslmode=require) so local dev
- * without SSL still works.
+ * All reads/writes go through Firestore via `db` and the repository helpers in
+ * ./firestoreRepo.js. Money-mutating operations use Firestore multi-document
+ * transactions via `runTransaction` for all-or-nothing semantics.
  */
-const ssl = /[?&]sslmode=require/.test(env.DATABASE_URL);
 
-export const sequelize = new Sequelize(env.DATABASE_URL, {
-  dialect: 'postgres',
-  logging: env.NODE_ENV === 'development' ? console.log : false,
-  define: {
-    underscored: true, // map JS camelCase → snake_case columns, timestamps included
-    freezeTableName: false,
-  },
-  dialectOptions: ssl ? { ssl: { rejectUnauthorized: false } } : {},
-});
+export { db };
+
+/**
+ * Run a Firestore transaction. Mirrors the signature/usage the Sequelize code
+ * used (`await runTransaction(async (tx) => { ... })`) but the callbacks receive
+ * a Firestore Transaction, used with the repository `inTx*` helpers.
+ *
+ * @param {(tx: import('firebase-admin/firestore').Transaction) => Promise<any>} fn
+ * @returns the value returned by fn
+ */
+export async function runTransaction(fn) {
+  return db.runTransaction(fn);
+}
 
 /**
  * Lightweight connectivity check used by /health and server boot.
- * Returns true when the pool can run `SELECT 1`.
+ * Lists 1 doc from subscription_plans to confirm the DB is reachable.
+ * Wrapped in a short timeout so /health always answers quickly even when
+ * Firestore is unreachable.
  */
 export async function pingDb() {
-  try {
-    await sequelize.query('SELECT 1');
-    return true;
-  } catch {
-    return false;
-  }
+  const timeout = new Promise((resolve) => setTimeout(() => resolve(false), 2500));
+  const check = (async () => {
+    try {
+      const snap = await db.collection(COLS.subscriptionPlans).limit(1).get();
+      return snap.size >= 0;
+    } catch {
+      return false;
+    }
+  })();
+  return Promise.race([check, timeout]);
 }

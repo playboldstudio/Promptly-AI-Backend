@@ -1,6 +1,5 @@
-import { Op } from 'sequelize';
-import { Prompt, PromptPurchase, Payout, Transaction } from '../db/models.js';
-import { sequelize } from '../db/config.js';
+import { COLS, queryAll, getMany } from '../db/firestoreRepo.js';
+import { balanceFor } from './ledger.js';
 
 /**
  * Creator earnings — everything derived from prompt_purchases + payouts + ledger.
@@ -17,39 +16,35 @@ import { sequelize } from '../db/config.js';
  * All amounts are integer rupees.
  */
 
-// Only non-refunded sales count toward earnings.
-const SALE_WHERE = { status: 'completed' };
-
 /**
  * Per-prompt breakdown for a creator, newest prompts first.
- * totalInr      — sum of net_inr across completed sales of that prompt
+ * totalInr      — sum of netInr across completed sales of that prompt
  * salesCount    — number of completed sales
  * promptTitle   — denormalized title for the UI (authorId match)
  */
 export async function getEarningsByPrompt(authorId) {
-  const rows = await PromptPurchase.findAll({
-    where: { ...SALE_WHERE, authorId },
-    attributes: [
-      'promptId',
-      [sequelize.fn('SUM', sequelize.col('net_inr')), 'totalInr'],
-      [sequelize.fn('COUNT', sequelize.col('id')), 'salesCount'],
-    ],
-    group: ['promptId'],
-    raw: true,
+  const { rows } = await queryAll({
+    collection: COLS.promptPurchases,
+    filters: [{ field: 'authorId', value: authorId }, { field: 'status', value: 'completed' }],
   });
 
-  const promptIds = rows.map((r) => r.promptId);
-  const prompts = promptIds.length
-    ? await Prompt.findAll({ where: { id: { [Op.in]: promptIds } }, attributes: ['id', 'title'] })
-    : [];
+  const byPrompt = new Map();
+  rows.forEach((r) => {
+    const entry = byPrompt.get(r.promptId) ?? { totalInr: 0, salesCount: 0 };
+    entry.totalInr += Number(r.netInr) || 0;
+    entry.salesCount += 1;
+    byPrompt.set(r.promptId, entry);
+  });
 
-  const titleById = new Map(prompts.map((p) => [p.id, p.title]));
+  const promptIds = [...byPrompt.keys()];
+  const prompts = promptIds.length ? await getMany(COLS.prompts, promptIds) : {};
+  const titleById = new Map(promptIds.map((id) => [id, prompts[id]?.title ?? null]));
 
-  return rows.map((r) => ({
-    promptId: r.promptId,
-    title: titleById.get(r.promptId) ?? 'Unknown prompt',
-    totalInr: Number(r.totalInr) || 0,
-    salesCount: Number(r.salesCount) || 0,
+  return [...byPrompt.entries()].map(([promptId, e]) => ({
+    promptId,
+    title: titleById.get(promptId) ?? 'Unknown prompt',
+    totalInr: e.totalInr || 0,
+    salesCount: e.salesCount || 0,
   }));
 }
 
@@ -62,48 +57,30 @@ export async function getEarningsByPrompt(authorId) {
  *   salesCount     — completed sales count
  */
 export async function getEarningsSummary(authorId) {
-  const [sales, payoutRows, ledger] = await Promise.all([
-    PromptPurchase.findAll({
-      where: { ...SALE_WHERE, authorId },
-      attributes: [
-        [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('net_inr')), 0), 'totalNetInr'],
-        [sequelize.fn('COUNT', sequelize.col('id')), 'salesCount'],
-      ],
-      raw: true,
+  const [sales, payoutRows, balance] = await Promise.all([
+    queryAll({
+      collection: COLS.promptPurchases,
+      filters: [{ field: 'authorId', value: authorId }, { field: 'status', value: 'completed' }],
     }),
-    Payout.findAll({
-      where: { userId: authorId },
-      attributes: ['status', 'amountInr'],
-      raw: true,
-    }),
-    Transaction.findAll({
-      where: { userId: authorId },
-      attributes: ['direction', 'amountInr'],
-      raw: true,
-    }),
+    queryAll({ collection: COLS.payouts, filters: [{ field: 'userId', value: authorId }] }),
+    balanceFor(authorId),
   ]);
 
-  const totalEarnings = Number(sales[0]?.totalNetInr) || 0;
-  const salesCount = Number(sales[0]?.salesCount) || 0;
+  const totalEarnings = sales.rows.reduce((sum, s) => sum + (Number(s.netInr) || 0), 0);
+  const salesCount = sales.rows.length;
 
-  const withdrawnInr = payoutRows
+  const withdrawnInr = payoutRows.rows
     .filter((p) => ['processing', 'paid'].includes(p.status))
-    .reduce((sum, p) => sum + p.amountInr, 0);
-  const pendingPayouts = payoutRows
+    .reduce((sum, p) => sum + (Number(p.amountInr) || 0), 0);
+  const pendingPayouts = payoutRows.rows
     .filter((p) => p.status === 'pending')
-    .reduce((sum, p) => sum + p.amountInr, 0);
-
-  // Ledger balance is the source of truth for "available": credits − debits.
-  const balanceInr = ledger.reduce((sum, t) => {
-    const signed = t.direction === 'credit' ? t.amountInr : -t.amountInr;
-    return sum + signed;
-  }, 0);
+    .reduce((sum, p) => sum + (Number(p.amountInr) || 0), 0);
 
   return {
     totalEarnings,
     salesCount,
     withdrawnInr,
     pendingPayouts,
-    balanceInr, // what the creator can withdraw (subject to min ₹60 + saved UPI)
+    balanceInr: balance, // what the creator can withdraw (subject to min ₹60 + saved UPI)
   };
 }

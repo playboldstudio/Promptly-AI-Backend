@@ -1,11 +1,9 @@
-import { Op } from 'sequelize';
-import { Prompt, PromptPurchase, SavedPrompt } from '../db/models.js';
-import { sequelize } from '../db/config.js';
+import { COLS, findByPk, queryAll, remove, upsert, getMany } from '../db/firestoreRepo.js';
 import { derivePromptFlags } from './prompt-metrics.js';
 
 // Fields safe to expose publicly. promptText is intentionally excluded — it is the
 // paid asset and is only revealed to owners/unlockers (see getPromptById).
-// isTrending / isNew are NOT in the DB — they are derived (see derivePromptFlags).
+// isTrending / isNew are NOT stored — they are derived (see derivePromptFlags).
 const PUBLIC_PROMPT_ATTRS = [
   'id',
   'title',
@@ -18,80 +16,93 @@ const PUBLIC_PROMPT_ATTRS = [
   'viewCount',
   'saveCount',
   'createdAt',
-  'updatedAt',
 ];
 
 // Author info exposed on prompts (no email — avoid leaking PII publicly).
 const AUTHOR_ATTRS = ['id', 'fullName', 'avatarUrl', 'role'];
 
-function serializeAuthor(prompt) {
-  return prompt.author
+function serializeAuthor(author) {
+  return author
     ? {
-        id: prompt.author.id,
-        fullName: prompt.author.fullName,
-        avatarUrl: prompt.author.avatarUrl,
-        role: prompt.author.role,
+        id: author.id,
+        fullName: author.fullName,
+        avatarUrl: author.avatarUrl,
+        role: author.role,
       }
     : null;
 }
 
+/** Pick only the publicly-safe fields, mirroring the old PUBLIC_PROMPT_ATTRS projection. */
+function toPublicPrompt(json) {
+  const out = {};
+  for (const k of PUBLIC_PROMPT_ATTRS) out[k] = json[k];
+  return out;
+}
+
 /**
- * List published prompts with the browse filters used by the UI:
- *   ?category=cinematic     — filter by category
- *   ?paid=free|paid         — filter on is_paid
- *   ?sort=trending|new|recent — default recent
- *   ?q=...                  — simple title/description/tags search
- *
- * `viewerId` (optional) additionally annotates each row with savedByMe.
+ * List published prompts with the browse filters used by the UI.
+ * Firestore has no substring ILIKE or cross-field OR, so we fetch the published
+ * set and filter/sort in memory — identical behaviour, fine at this scale.
+ * The `trending` sort is derived engagement (not a stored column), so it is
+ * computed here too.
  */
 export async function listPrompts({ category, paid, sort, q, viewerId, limit = 50, offset = 0 }) {
-  const where = { status: 'published' };
+  const all = await queryAll({
+    collection: COLS.prompts,
+    filters: [{ field: 'status', value: 'published' }],
+    orderBy: { field: 'createdAt', direction: 'desc' },
+    limit: 10000, // load the catalog; small-scale app
+  });
 
-  if (category) where.category = category;
-  if (paid === 'free') where.isPaid = false;
-  if (paid === 'paid') where.isPaid = true;
+  let rows = all.rows;
+
+  if (category) rows = rows.filter((r) => r.category === category);
+  if (paid === 'free') rows = rows.filter((r) => !r.isPaid);
+  if (paid === 'paid') rows = rows.filter((r) => r.isPaid);
   if (q) {
-    where[Op.or] = [
-      { title: { [Op.iLike]: `%${q}%` } },
-      { description: { [Op.iLike]: `%${q}%` } },
-      { tags: { [Op.overlap]: [q] } },
-    ];
+    const needle = q.toLowerCase();
+    rows = rows.filter((r) =>
+      (r.title ?? '').toLowerCase().includes(needle) ||
+      (r.description ?? '').toLowerCase().includes(needle) ||
+      (Array.isArray(r.tags) && r.tags.some((t) => t.toLowerCase().includes(needle))),
+    );
   }
 
-  // Trending sort = derived engagement, evaluated by Postgres (no stored column).
-  const order =
-    sort === 'trending'
-      ? [sequelize.literal('"view_count" + "save_count" DESC')]
-      : [['createdAt', 'DESC']];
+  if (sort === 'trending') {
+    rows = rows.sort(
+      (a, b) =>
+        (Number(b.viewCount) + Number(b.saveCount)) -
+        (Number(a.viewCount) + Number(a.saveCount)),
+    );
+  } else {
+    rows = rows.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  }
 
-  const { rows, count } = await Prompt.findAndCountAll({
-    where,
-    attributes: PUBLIC_PROMPT_ATTRS,
-    include: [{ association: 'author', attributes: AUTHOR_ATTRS, required: false }],
-    order,
-    limit,
-    offset,
-    distinct: true,
-  });
+  const total = rows.length;
+  const page = rows.slice(offset, offset + limit);
+
+  const authorIds = [...new Set(page.map((r) => r.authorId).filter(Boolean))];
+  const authors = authorIds.length ? await getMany(COLS.users, authorIds) : {};
 
   // One query for the viewer's saved prompt ids → savedByMe set membership.
   let savedIds = new Set();
   if (viewerId) {
-    const saved = await SavedPrompt.findAll({
-      where: { userId: viewerId },
-      attributes: ['promptId'],
+    const saved = await queryAll({
+      collection: COLS.savedPrompts,
+      filters: [{ field: 'userId', value: viewerId }],
+      limit: 10000,
     });
-    savedIds = new Set(saved.map((s) => s.promptId));
+    savedIds = new Set(saved.rows.map((s) => s.promptId));
   }
 
-  const prompts = rows.map((row) => ({
-    ...row.toJSON(),
+  const prompts = page.map((row) => ({
+    ...toPublicPrompt(row),
     ...derivePromptFlags(row),
-    author: serializeAuthor(row),
+    author: serializeAuthor(authors[row.authorId] ?? null),
     savedByMe: viewerId ? savedIds.has(row.id) : false,
   }));
 
-  return { prompts, total: count, limit, offset };
+  return { prompts, total, limit, offset };
 }
 
 /**
@@ -100,11 +111,10 @@ export async function listPrompts({ category, paid, sort, q, viewerId, limit = 5
  * or they have a completed PromptPurchase (unlock) row. Also annotates savedByMe.
  */
 export async function getPromptById(id, viewerId) {
-  const prompt = await Prompt.findOne({
-    where: { id, status: 'published' },
-    include: [{ association: 'author', attributes: AUTHOR_ATTRS, required: false }],
-  });
-  if (!prompt) return null;
+  const prompt = await findByPk(COLS.prompts, id);
+  if (!prompt || prompt.status !== 'published') return null;
+
+  const author = prompt.authorId ? await findByPk(COLS.users, prompt.authorId) : null;
 
   // Free prompts are always unlocked; paid ones unlock for the owner or a buyer.
   let unlocked = !prompt.isPaid || Boolean(viewerId && prompt.authorId === viewerId);
@@ -114,22 +124,20 @@ export async function getPromptById(id, viewerId) {
     const [purchase, saved] = await Promise.all([
       unlocked
         ? null
-        : PromptPurchase.findOne({
-            where: { buyerId: viewerId, promptId: prompt.id, status: 'completed' },
-          }),
-      SavedPrompt.findOne({ where: { userId: viewerId, promptId: prompt.id } }),
+        : findByPk(COLS.promptPurchases, `${viewerId}_${id}`),
+      findByPk(COLS.savedPrompts, `${viewerId}_${id}`),
     ]);
-    if (purchase) unlocked = true;
+    if (purchase && purchase.status === 'completed') unlocked = true;
     savedByMe = Boolean(saved);
   }
 
-  const json = prompt.toJSON();
+  const json = { ...prompt };
   if (!unlocked) delete json.promptText; // gate the paid prompt body
 
   return {
     ...json,
     ...derivePromptFlags(prompt),
-    author: serializeAuthor(prompt),
+    author: serializeAuthor(author),
     savedByMe,
     unlocked,
   };
@@ -140,7 +148,13 @@ export async function getPromptById(id, viewerId) {
  */
 export async function recordPromptView(id) {
   try {
-    await Prompt.increment('viewCount', { where: { id } });
+    const prompt = await findByPk(COLS.prompts, id);
+    if (prompt) {
+      await upsert(COLS.prompts, id, {
+        viewCount: (Number(prompt.viewCount) || 0) + 1,
+        updatedAt: new Date(),
+      });
+    }
   } catch {
     // non-fatal
   }
@@ -151,18 +165,28 @@ export async function recordPromptView(id) {
  * Idempotent: saving twice is a no-op. Returns the updated save count.
  */
 export async function savePrompt(promptId, userId) {
-  const prompt = await Prompt.findByPk(promptId);
+  const prompt = await findByPk(COLS.prompts, promptId);
   if (!prompt) return { notFound: true };
 
-  const [, created] = await SavedPrompt.findOrCreate({
-    where: { userId, promptId },
-  });
-  if (created) {
-    await Prompt.increment('saveCount', { where: { id: promptId } });
+  const key = `${userId}_${promptId}`;
+  const existing = await findByPk(COLS.savedPrompts, key);
+  let created = false;
+  if (!existing) {
+    await upsert(COLS.savedPrompts, key, {
+      userId,
+      promptId,
+      savedAt: new Date(),
+    });
+    created = true;
   }
 
-  const updated = await Prompt.findByPk(promptId, { attributes: ['saveCount'] });
-  return { saved: true, saveCount: updated.saveCount };
+  let saveCount = Number(prompt.saveCount) || 0;
+  if (created) {
+    saveCount += 1;
+    await upsert(COLS.prompts, promptId, { saveCount, updatedAt: new Date() });
+  }
+
+  return { saved: true, saveCount };
 }
 
 /**
@@ -170,15 +194,15 @@ export async function savePrompt(promptId, userId) {
  * Idempotent. Returns the updated save count.
  */
 export async function unsavePrompt(promptId, userId) {
-  const deleted = await SavedPrompt.destroy({ where: { userId, promptId } });
-  if (deleted) {
-    // Floor at 0 so a stale counter can never go negative.
-    await Prompt.decrement('saveCount', {
-      by: 1,
-      where: { id: promptId, saveCount: { [Op.gt]: 0 } },
-    });
+  const key = `${userId}_${promptId}`;
+  const deleted = await remove(COLS.savedPrompts, key);
+
+  const prompt = await findByPk(COLS.prompts, promptId);
+  let saveCount = Number(prompt?.saveCount) || 0;
+  if (deleted && saveCount > 0) {
+    saveCount -= 1;
+    await upsert(COLS.prompts, promptId, { saveCount, updatedAt: new Date() });
   }
 
-  const updated = await Prompt.findByPk(promptId, { attributes: ['saveCount'] });
-  return { saved: false, saveCount: updated ? updated.saveCount : 0 };
+  return { saved: false, saveCount };
 }

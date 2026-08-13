@@ -7,10 +7,17 @@ import { z } from 'zod';
  */
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.coerce.number().int().positive().default(3000),
-  DATABASE_URL: z
-    .string()
-    .min(1, 'DATABASE_URL is required (e.g. postgresql://user:pass@host:5432/promptly)'),
+  PORT: z.coerce.number().int().positive().default(8080),
+
+  // Firebase / Firestore — the datastore. FIREBASE_PROJECT_ID is required.
+  FIREBASE_PROJECT_ID: z.string().min(1, 'FIREBASE_PROJECT_ID is required'),
+  // Service-account (optional — if unset, ADC / Cloud Run default SA is used).
+  FIREBASE_CLIENT_EMAIL: z.string().optional().default(''),
+  FIREBASE_PRIVATE_KEY: z.string().optional().default(''),
+  // Optional — path to a service-account JSON (equivalent to GOOGLE_APPLICATION_CREDENTIALS).
+  GOOGLE_APPLICATION_CREDENTIALS: z.string().optional().default(''),
+  // Google Cloud Storage bucket for uploaded prompt images (optional — only if uploads used).
+  STORAGE_BUCKET: z.string().optional().default(''),
 
   // Razorpay — all optional so the app boots without them (payments throw 501).
   RAZORPAY_KEY_ID: z.string().optional().default(''),
@@ -22,8 +29,7 @@ const envSchema = z.object({
   RAZORPAY_PLAN_PRO_ID: z.string().optional().default(''),
   RAZORPAY_PLAN_CREATOR_ID: z.string().optional().default(''),
 
-  // Deploy / URLs — see src/config/urls.js. There is no local/test URL anymore:
-  // everything uses the single LIVE API URL.
+  // Deploy / URLs — see src/config/urls.js. Single live API URL (Cloud Run).
   PUBLIC_BASE_URL: z.string().optional().default(''),
   // Extra browser origins CORS should accept (comma-separated), e.g. a web
   // frontend dev server. The live API URL is always allowed.

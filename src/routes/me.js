@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
-import { getProfile, getMyPrompts, getSavedPrompts, getTransactions } from '../services/me.service.js';
+import { getProfile, getMyPrompts, getSavedPrompts, getTransactions, setUpiId } from '../services/me.service.js';
 import { getEarningsSummary, getEarningsByPrompt } from '../services/earnings.service.js';
 
 const router = Router();
@@ -90,8 +90,8 @@ router.post('/upi', async (req, res, next) => {
       err.status = 400;
       return next(err);
     }
-    await req.user.update({ upiId: parsed.data.upiId });
-    return res.json({ user: req.user });
+    const user = await setUpiId(req.userId, parsed.data.upiId);
+    return res.json({ user });
   } catch (err) {
     return next(err);
   }

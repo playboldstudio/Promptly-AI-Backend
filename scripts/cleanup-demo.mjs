@@ -1,11 +1,22 @@
 import 'dotenv/config';
-import { sequelize } from '../src/db/config.js';
-import { User, Payout, Transaction, UserSubscription } from '../src/db/models.js';
+import { db } from '../src/db/firestore.js';
+import { COLS } from '../src/db/firestoreRepo.js';
 
-const user = await User.findOne({ where: { email: 'demo@promptly.app' } });
-if (!user) { console.log('no demo user'); process.exit(0); }
-await UserSubscription.destroy({ where: { userId: user.id } });
-await Payout.destroy({ where: { userId: user.id } });
-await Transaction.destroy({ where: { userId: user.id } });
+// Dev helper — wipe test state for the demo user (demo_creator).
+const USER_ID = 'demo_creator';
+
+function clearCollectionByField(collection, field, value) {
+  return db
+    .collection(collection)
+    .where(field, '==', value)
+    .get()
+    .then((snap) => Promise.all(snap.docs.map((d) => d.ref.delete())));
+}
+
+await clearCollectionByField(COLS.userSubscriptions, 'userId', USER_ID);
+await clearCollectionByField(COLS.payouts, 'userId', USER_ID);
+await clearCollectionByField(COLS.transactions, 'userId', USER_ID);
+
+await db.collection(COLS.userBalances).doc(USER_ID).delete().catch(() => {});
 console.log('cleaned demo user test state');
-await sequelize.close();
+process.exit(0);
