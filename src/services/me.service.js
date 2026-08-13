@@ -1,4 +1,11 @@
-import { Prompt, Transaction, UserSubscription, SavedPrompt, KycVerification } from '../db/models.js';
+import {
+  Prompt,
+  PromptPurchase,
+  Transaction,
+  UserSubscription,
+  SavedPrompt,
+  KycVerification,
+} from '../db/models.js';
 
 /**
  * Profile for the signed-in user: profile fields + current subscription + KYC state.
@@ -45,7 +52,38 @@ export async function getSavedPrompts(userId, { limit = 50, offset = 0 } = {}) {
     offset,
     distinct: true,
   });
-  return { saved: rows, total: count };
+
+  // Gate the paid prompt body the same way the prompt feed/detail do:
+  // unlock when free, the viewer is the author, or they have a completed purchase.
+  const promptIds = rows.map((r) => r.promptId).filter(Boolean);
+  const purchases =
+    promptIds.length === 0
+      ? []
+      : await PromptPurchase.findAll({
+          where: { buyerId: userId, promptId: promptIds, status: 'completed' },
+        });
+  const unlockedIds = new Set(purchases.map((p) => p.promptId));
+
+  const saved = rows.map((row) => {
+    const prompt = row.prompt;
+    const json = prompt ? prompt.toJSON() : {};
+    const unlocked =
+      !prompt ||
+      !json.isPaid ||
+      (json.authorId && json.authorId === userId) ||
+      unlockedIds.has(json.id);
+    if (!unlocked) delete json.promptText;
+    return {
+      ...row.toJSON(),
+      prompt: {
+        ...json,
+        savedByMe: true,
+        unlocked,
+      },
+    };
+  });
+
+  return { saved, total: count };
 }
 
 /**

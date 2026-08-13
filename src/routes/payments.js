@@ -50,7 +50,6 @@ const verifySchema = z.object({
   orderId: z.string(),
   paymentId: z.string(),
   signature: z.string(),
-  amountInr: z.number().int().positive().optional(),
 });
 
 /**

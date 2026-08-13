@@ -91,22 +91,51 @@ export async function verifyAndUnlock({
   orderId,
   paymentId,
   signature,
-  amountInr,
 }) {
   // Server-side signature check (HMAC-SHA256 of `order_id|payment_id`).
   if (!verifyPaymentSignature({ orderId, paymentId, signature })) {
     return { error: { status: 400, message: 'Invalid payment signature' } };
   }
 
-  const result = await unlockPrompt({ buyerId, promptId, orderId, paymentId, amountInr });
-  return result;
+  const prompt = await Prompt.findByPk(promptId);
+  if (!prompt) return { error: { status: 404, message: 'Prompt not found' } };
+
+  // Money integrity — never trust the client for the amount. Bind this payment
+  // to THIS prompt's order and confirm the captured amount matches:
+  // 1) the order belongs to this prompt (receipt = prompt_<id>, notes.promptId)
+  // 2) the order amount equals the prompt price
+  // 3) the payment is captured and its amount equals the order amount
+  const [order, payment] = await Promise.all([
+    razorpay.orders.fetch(orderId).catch(() => null),
+    razorpay.payments.fetch(paymentId).catch(() => null),
+  ]);
+
+  if (
+    !order ||
+    order.receipt !== `prompt_${promptId}` ||
+    order.notes?.promptId !== promptId
+  ) {
+    return { error: { status: 400, message: 'Order does not match this prompt' } };
+  }
+  if (Number(order.amount) !== prompt.priceInr * 100) {
+    return { error: { status: 400, message: 'Order amount does not match the prompt price' } };
+  }
+  if (!payment || payment.order_id !== orderId || payment.status !== 'captured') {
+    return { error: { status: 400, message: 'Payment has not been captured' } };
+  }
+  if (Number(payment.amount) !== Number(order.amount)) {
+    return { error: { status: 400, message: 'Payment amount does not match the order' } };
+  }
+
+  const priceInr = Math.round(Number(payment.amount) / 100);
+  return unlockPrompt({ buyerId, promptId, orderId, paymentId, priceInr });
 }
 
 /**
  * Write the PromptPurchase + ledger rows for a completed sale.
  * Wrapped in a transaction so money rows are all-or-nothing.
  */
-async function unlockPrompt({ buyerId, promptId, orderId, paymentId, amountInr }) {
+async function unlockPrompt({ buyerId, promptId, orderId, paymentId, priceInr }) {
   const prompt = await Prompt.findByPk(promptId);
   if (!prompt) return { error: { status: 404, message: 'Prompt not found' } };
 
@@ -115,13 +144,17 @@ async function unlockPrompt({ buyerId, promptId, orderId, paymentId, amountInr }
     return { error: { status: 409, message: 'You already own this prompt' } };
   }
 
+  // Prevents a caller from passing a made-up price while paying the real amount.
+  if (Math.round(Number(priceInr)) !== prompt.priceInr) {
+    return { error: { status: 400, message: 'Price does not match the prompt price' } };
+  }
+
   // Recompute the financial snapshot from the *current* buyer fee.
   const subscription = await UserSubscription.findOne({
     where: { userId: buyerId, status: 'active' },
     include: [{ association: 'plan' }],
   });
   const feePercent = subscription?.plan?.platformFeePercent ?? 0;
-  const priceInr = amountInr ?? prompt.priceInr;
   const feeInr = Math.round((priceInr * feePercent) / 100);
   const netInr = priceInr - feeInr;
 
@@ -166,9 +199,6 @@ async function unlockPrompt({ buyerId, promptId, orderId, paymentId, amountInr }
         },
         t,
       );
-
-      // Derived counter: bump the author's save-ish signal / the prompt's engagement.
-      await Prompt.increment('saveCount', { where: { id: promptId }, transaction: t });
     });
 
     return { success: true, unlocked: true, promptId, paymentId, orderId };
