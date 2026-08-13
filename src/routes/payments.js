@@ -44,9 +44,11 @@ function requireRazorpayKeys(req, res, next) {
   return next();
 }
 
-const orderSchema = z.object({ promptId: z.string().uuid() });
+// promptId is a Firestore doc id (slug for seeded prompts, e.g. "neon-city-nights"),
+// not a UUID — accept any non-empty string.
+const orderSchema = z.object({ promptId: z.string().min(1) });
 const verifySchema = z.object({
-  promptId: z.string().uuid(),
+  promptId: z.string().min(1),
   orderId: z.string(),
   paymentId: z.string(),
   signature: z.string(),

@@ -1,3 +1,4 @@
+import { pathToFileURL } from 'node:url';
 import { COLS, findByPk, upsert } from '../db/firestoreRepo.js';
 
 /**
@@ -135,7 +136,7 @@ async function main() {
 export default main;
 
 // Run directly (`node src/db/seed.js`) or via `npm run db:seed`.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error('❌ Seed failed:', err.message);
     process.exit(1);

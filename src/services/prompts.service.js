@@ -1,4 +1,4 @@
-import { COLS, findByPk, queryAll, remove, upsert, getMany } from '../db/firestoreRepo.js';
+import { COLS, findByPk, queryAll, remove, upsert, getMany, increment } from '../db/firestoreRepo.js';
 import { derivePromptFlags } from './prompt-metrics.js';
 
 // Fields safe to expose publicly. promptText is intentionally excluded — it is the
@@ -148,13 +148,10 @@ export async function getPromptById(id, viewerId) {
  */
 export async function recordPromptView(id) {
   try {
-    const prompt = await findByPk(COLS.prompts, id);
-    if (prompt) {
-      await upsert(COLS.prompts, id, {
-        viewCount: (Number(prompt.viewCount) || 0) + 1,
-        updatedAt: new Date(),
-      });
-    }
+    await upsert(COLS.prompts, id, {
+      viewCount: increment(1),
+      updatedAt: new Date(),
+    });
   } catch {
     // non-fatal
   }
@@ -182,8 +179,8 @@ export async function savePrompt(promptId, userId) {
 
   let saveCount = Number(prompt.saveCount) || 0;
   if (created) {
+    await upsert(COLS.prompts, promptId, { saveCount: increment(1), updatedAt: new Date() });
     saveCount += 1;
-    await upsert(COLS.prompts, promptId, { saveCount, updatedAt: new Date() });
   }
 
   return { saved: true, saveCount };
@@ -197,12 +194,13 @@ export async function unsavePrompt(promptId, userId) {
   const key = `${userId}_${promptId}`;
   const deleted = await remove(COLS.savedPrompts, key);
 
-  const prompt = await findByPk(COLS.prompts, promptId);
-  let saveCount = Number(prompt?.saveCount) || 0;
-  if (deleted && saveCount > 0) {
-    saveCount -= 1;
-    await upsert(COLS.prompts, promptId, { saveCount, updatedAt: new Date() });
+  if (deleted) {
+    await upsert(COLS.prompts, promptId, {
+      saveCount: increment(-1),
+      updatedAt: new Date(),
+    });
   }
 
-  return { saved: false, saveCount };
+  const prompt = await findByPk(COLS.prompts, promptId);
+  return { saved: false, saveCount: Math.max(Number(prompt?.saveCount) || 0, 0) };
 }

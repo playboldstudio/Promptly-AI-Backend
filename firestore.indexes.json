@@ -18,6 +18,15 @@
       ]
     },
     {
+      "collectionGroup": "user_subscriptions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "razorpaySubId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "payouts",
       "queryScope": "COLLECTION",
       "fields": [
@@ -62,6 +71,14 @@
       "queryScope": "COLLECTION",
       "fields": [
         { "fieldPath": "authorId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "prompt_purchases",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "buyerId", "order": "ASCENDING" },
         { "fieldPath": "status", "order": "ASCENDING" }
       ]
     }
