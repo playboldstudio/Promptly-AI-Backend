@@ -52,13 +52,15 @@ npm run dev                # http://localhost:8080
 |---|---|
 | `npm run dev` | Run with hot reload (`node --watch`) |
 | `npm start` | Run without watch |
+| `npm test` | Unit tests (Node's built-in `node:test` — no framework dep) |
 | `npm run db:sync` | Verify Firestore connectivity (schema is implicit — no tables) |
 | `npm run db:seed` | Seed starter data into Firestore (idempotent) |
-| `npm run db:reset` | **Destructive** — clear all Firestore collections, then seed (dev only) |
+| `npm run db:reset` | **Destructive** — clear all Firestore collections, then seed (dev only; refuses in production) |
 
 > Firestore is schemaless — collections are created on first write. Composite
-> indexes are defined in `firestore.indexes.json` and applied via
-> `npx firebase deploy --only firestore:indexes`.
+> indexes are defined in `firestore.indexes.json` and client access is locked
+> down by `firestore.rules` (deny-all). Apply both via
+> `npx firebase deploy --only firestore`.
 
 ## Deploy on Google Cloud Run
 
@@ -76,8 +78,8 @@ gcloud config set project $PROJECT_ID
 gcloud services enable firestore.googleapis.com firebaseauth.googleapis.com \
   run.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com
 
-# One-time: create Firestore composite indexes
-npx firebase deploy --only firestore:indexes
+# One-time: create Firestore composite indexes + apply security rules
+npx firebase deploy --only firestore
 
 # Seed the starter plans + demo prompts into Firestore (once)
 npm run db:seed
@@ -110,6 +112,7 @@ gcloud run deploy promptly-ai-backend \
 | POST | `/auth/dev/login` | – | **Dev only (disabled in production).** `{ email }` → dev user + bare token. |
 | GET | `/prompts` | optional | List published prompts. `?category=`, `?paid=free|paid`, `?sort=trending|new|recent`, `?q=` |
 | GET | `/prompts/:id` | optional | Prompt detail. Paid prompt text unlocked only for owner/unlockers. |
+| POST | `/prompts` | ✅ | **Creator publish.** Body `{ title, description, promptText, imageUrl?, category, tags?, isPaid, priceInr? }`. `authorId` = caller. Gated on the plan's daily post limit (Free = 3/day; Pro/Creator unlimited) and paid prompts require the **Creator** plan (`canPostPaid`). |
 | POST | `/prompts/:id/save` | ✅ | Save a prompt (idempotent). Returns `{ saved, saveCount }`. |
 | POST | `/prompts/:id/unsave` | ✅ | Remove a save (idempotent). Returns `{ saved, saveCount }`. |
 | GET | `/me/profile` | ✅ | Signed-in user profile + current subscription + KYC state |
@@ -251,11 +254,11 @@ src/
 
 ## Roadmap / not yet built
 
-- **Admin role gating** — `/payments/admin/*` is now gated by `ADMIN_EMAILS` (403 for others).
+- **Admin role gating** — `/payments/admin/*` is gated by `ADMIN_EMAILS` (403 for others).
 - Refund flow (`prompt_purchases.status = 'refunded'` → reverse ledger rows)
 - **Encrypt** `bank_accounts.account_number_full` (and the KYC `pan`) — plaintext today, test-mode only
 - RazorpayX Payouts — only if/when you register a **business** account; the manual-settle
   flow is the solo-individual path
-- Rate limiting, request logging to a service, tests
-- Firestore security rules for client-side access (the backend uses the Admin SDK, which
-  bypasses rules — they matter only if the app reads Firestore directly)
+- Distributed rate limiting (the built-in limiter is per-instance in-memory)
+- Client-side Firestore reads — **decided:** all access stays behind the API; `firestore.rules`
+  denies all direct client access (the backend uses the Admin SDK, which bypasses rules)

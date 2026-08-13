@@ -2,8 +2,12 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { firebaseAuth } from '../db/firestore.js';
 import { COLS, findByPk, queryAll, upsert } from '../db/firestoreRepo.js';
+import { rateLimit } from '../middleware/rateLimit.js';
 
 const router = Router();
+
+// Throttle brute-force attempts on the token endpoints.
+const loginLimiter = rateLimit({ windowMs: 60_000, max: 30, message: 'Too many login attempts — try again shortly' });
 
 /**
  * POST /auth/login — exchange a Firebase ID token for the app's user record.
@@ -16,7 +20,7 @@ const router = Router();
  */
 const loginSchema = z.object({ idToken: z.string().min(1) });
 
-router.post('/auth/login', async (req, res, next) => {
+router.post('/auth/login', loginLimiter, async (req, res, next) => {
   try {
     const parsed = loginSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -63,7 +67,7 @@ const devLoginSchema = z.object({
   fullName: z.string().optional(),
 });
 
-router.post('/auth/dev/login', async (req, res, next) => {
+router.post('/auth/dev/login', loginLimiter, async (req, res, next) => {
   try {
     if (process.env.NODE_ENV === 'production') {
       const err = new Error('Not found');

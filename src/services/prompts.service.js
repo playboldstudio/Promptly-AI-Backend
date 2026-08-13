@@ -1,5 +1,7 @@
-import { COLS, findByPk, queryAll, remove, upsert, getMany, increment } from '../db/firestoreRepo.js';
+import crypto from 'node:crypto';
+import { COLS, findByPk, queryAll, remove, upsert, create, getMany, increment } from '../db/firestoreRepo.js';
 import { derivePromptFlags } from './prompt-metrics.js';
+import { currentActiveSubscriptionWithPlan } from './payments/_subs.js';
 
 // Fields safe to expose publicly. promptText is intentionally excluded — it is the
 // paid asset and is only revealed to owners/unlockers (see getPromptById).
@@ -140,6 +142,76 @@ export async function getPromptById(id, viewerId) {
     author: serializeAuthor(author),
     savedByMe,
     unlocked,
+  };
+}
+
+/**
+ * Publish a new prompt as the signed-in creator. Sets authorId = the caller
+ * (owner). Gates:
+ *   - Free plan daily post limit (Free = 3/day from the plan seed; Pro/Creator
+ *     have dailyPostLimit null = unlimited).
+ *   - Paid prompts require the Creator plan (canPostPaid on the plan).
+ * New prompts are published immediately and use a UUID doc id.
+ * @returns {{ prompt: object } | {error: {status, message}}}
+ */
+export async function createPrompt({ userId, input }) {
+  const user = await findByPk(COLS.users, userId);
+  if (!user) return { error: { status: 404, message: 'User not found' } };
+
+  const sub = await currentActiveSubscriptionWithPlan(userId);
+  const plan = sub?.plan ?? null;
+
+  // GATE — daily post limit from the current plan. null = unlimited (Pro/Creator);
+  // no active sub = Free tier (3/day from the plan seed).
+  const dailyLimit = plan ? plan.dailyPostLimit : 3;
+  if (dailyLimit) {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const { rows } = await queryAll({
+      collection: COLS.prompts,
+      filters: [{ field: 'authorId', value: userId }],
+      limit: 10000,
+    });
+    const postedToday = rows.filter((r) => new Date(r.createdAt) >= startOfDay).length;
+    if (postedToday >= dailyLimit) {
+      return {
+        error: { status: 429, message: `Daily publish limit reached (${dailyLimit}/day) — upgrade to Pro/Creator for unlimited` },
+      };
+    }
+  }
+
+  // GATE — paid prompts need the Creator plan (canPostPaid).
+  if (input.isPaid && !plan?.canPostPaid) {
+    return { error: { status: 403, message: 'Paid prompts require the Creator plan' } };
+  }
+
+  const id = crypto.randomUUID();
+  const now = new Date();
+  await create(COLS.prompts, id, {
+    authorId: userId,
+    title: input.title,
+    description: input.description,
+    promptText: input.promptText,
+    imageUrl: input.imageUrl ?? null,
+    category: input.category,
+    tags: input.tags ?? [],
+    isPaid: input.isPaid,
+    priceInr: input.isPaid ? input.priceInr : null,
+    status: 'published',
+    viewCount: 0,
+    saveCount: 0,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  const prompt = await findByPk(COLS.prompts, id);
+  return {
+    prompt: {
+      ...toPublicPrompt(prompt),
+      ...derivePromptFlags(prompt),
+      author: serializeAuthor({ id: user.id, fullName: user.fullName, avatarUrl: user.avatarUrl, role: user.role }),
+      savedByMe: false,
+    },
   };
 }
 

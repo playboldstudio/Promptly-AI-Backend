@@ -1,10 +1,12 @@
 import { Router } from 'express';
+import { z } from 'zod';
 import {
   listPrompts,
   getPromptById,
   recordPromptView,
   savePrompt,
   unsavePrompt,
+  createPrompt,
 } from '../services/prompts.service.js';
 import { optionalAuth, requireAuth } from '../middleware/auth.js';
 
@@ -22,6 +24,49 @@ const PROMPT_CATEGORIES = [
 ];
 
 const router = Router();
+
+const createPromptSchema = z
+  .object({
+    title: z.string().trim().min(1).max(140),
+    description: z.string().trim().min(1).max(2000),
+    promptText: z.string().trim().min(1),
+    imageUrl: z.string().trim().url().optional().nullable(),
+    category: z.enum(PROMPT_CATEGORIES),
+    tags: z.array(z.string().trim().min(1)).max(20).default([]),
+    isPaid: z.boolean().default(false),
+    priceInr: z.number().int().positive().optional().nullable(),
+  })
+  .refine((v) => !v.isPaid || (v.isPaid && v.priceInr), {
+    message: 'A paid prompt requires a positive priceInr',
+    path: ['priceInr'],
+  });
+
+/**
+ * POST /prompts — creator publish. Authenticated; authorId is the caller.
+ * Gates: daily post limit from the plan (Free=3/day, Pro/Creator unlimited)
+ * and paid prompts require the Creator plan (canPostPaid).
+ * Body: { title, description, promptText, imageUrl?, category, tags?, isPaid, priceInr? }
+ */
+router.post('/prompts', requireAuth, async (req, res, next) => {
+  try {
+    const parsed = createPromptSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      const err = new Error(parsed.error.issues[0]?.message ?? 'Invalid prompt body');
+      err.status = 400;
+      return next(err);
+    }
+    const result = await createPrompt({ userId: req.userId, input: parsed.data });
+    if (result.error) {
+      const { status, message } = result.error;
+      const err = new Error(message);
+      err.status = status;
+      return next(err);
+    }
+    return res.status(201).json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
 
 /**
  * GET /prompts

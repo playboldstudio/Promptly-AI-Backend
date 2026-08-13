@@ -12,7 +12,8 @@
     "start": "node src/server.js",
     "db:sync": "node src/db/sync.js",
     "db:seed": "node src/db/seed.js",
-    "db:reset": "node src/db/reset.js"
+    "db:reset": "node src/db/reset.js",
+    "test": "node --test"
   },
   "dependencies": {
     "cors": "^2.8.5",

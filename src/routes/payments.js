@@ -10,8 +10,12 @@ import {
   markPayoutFailed,
 } from '../services/payments/payouts.service.js';
 import { createSubscription } from '../services/payments/subscriptions.service.js';
+import { rateLimit } from '../middleware/rateLimit.js';
 
 const router = Router();
+
+// Money-mutating endpoints — throttle per user/IP to blunt abuse.
+const moneyLimiter = rateLimit({ windowMs: 60_000, max: 60, message: 'Too many payment requests — try again shortly' });
 
 // All payment routes require auth. Razorpay-keyed routes (checkout/subscriptions)
 // additionally require the keys; the manual-settle payout routes do NOT touch
@@ -44,8 +48,9 @@ function requireRazorpayKeys(req, res, next) {
   return next();
 }
 
-// promptId is a Firestore doc id (slug for seeded prompts, e.g. "neon-city-nights"),
-// not a UUID — accept any non-empty string.
+// promptId is a Firestore doc id — seeded prompts use slugs (e.g.
+// "neon-city-nights"), creator-created prompts use UUIDs — so accept any
+// non-empty string.
 const orderSchema = z.object({ promptId: z.string().min(1) });
 const verifySchema = z.object({
   promptId: z.string().min(1),
@@ -58,7 +63,7 @@ const verifySchema = z.object({
  * POST /payments/checkout/order — create a Razorpay order for a paid prompt.
  * Body: { promptId } → { orderId, amountInr, currency, feePercent, feeInr, netInr, prompt }
  */
-router.post('/checkout/order', requireRazorpayKeys, async (req, res, next) => {
+router.post('/checkout/order', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
   try {
     const parsed = orderSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -83,7 +88,7 @@ router.post('/checkout/order', requireRazorpayKeys, async (req, res, next) => {
  * POST /payments/checkout/verify — verify the payment + unlock the prompt.
  * Body: { promptId, orderId, paymentId, signature } (Razorpay Checkout success payload)
  */
-router.post('/checkout/verify', requireRazorpayKeys, async (req, res, next) => {
+router.post('/checkout/verify', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
   try {
     const parsed = verifySchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -111,7 +116,7 @@ const subscriptionSchema = z.object({ planId: z.enum(['pro', 'creator']) });
  * Body: { planId: "pro" | "creator" } → { subscription: { razorpaySubId, shortUrl, ... } }
  * The app opens subscription.shortUrl to collect the first payment.
  */
-router.post('/subscriptions', requireRazorpayKeys, async (req, res, next) => {
+router.post('/subscriptions', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
   try {
     const parsed = subscriptionSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -142,7 +147,7 @@ const payoutSchema = z.object({ amountInr: z.number().int().positive() });
  * Body: { amountInr } → { payout: { id, amountInr, status } }
  * The admin transfers the money via their own bank app, then marks it paid.
  */
-router.post('/payouts', async (req, res, next) => {
+router.post('/payouts', moneyLimiter, async (req, res, next) => {
   try {
     const parsed = payoutSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -190,7 +195,7 @@ router.get('/admin/payouts', requireAdmin, async (req, res, next) => {
  * POST /payments/admin/payouts/:id/mark-paid — mark a payout paid after the
  * money has been transferred manually.
  */
-router.post('/admin/payouts/:id/mark-paid', requireAdmin, async (req, res, next) => {
+router.post('/admin/payouts/:id/mark-paid', moneyLimiter, requireAdmin, async (req, res, next) => {
   try {
     const result = await markPayoutPaid({ payoutId: req.params.id });
     if (result.error) {
@@ -209,7 +214,7 @@ router.post('/admin/payouts/:id/mark-paid', requireAdmin, async (req, res, next)
  * POST /payments/admin/payouts/:id/mark-failed — mark a payout failed; the
  * reserved balance is returned to the creator.
  */
-router.post('/admin/payouts/:id/mark-failed', requireAdmin, async (req, res, next) => {
+router.post('/admin/payouts/:id/mark-failed', moneyLimiter, requireAdmin, async (req, res, next) => {
   try {
     const result = await markPayoutFailed({
       payoutId: req.params.id,

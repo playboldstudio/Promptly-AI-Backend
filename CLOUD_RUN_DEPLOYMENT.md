@@ -18,6 +18,10 @@ and **Razorpay** for payments (unchanged).
 - `src/db/firestoreRepo.js` — Firestore data-access helpers (transactions, queries).
 - `src/services/payments/_subs.js` — shared subscription-with-plan reader.
 - `firestore.indexes.json` — required composite indexes.
+- `firestore.rules` + `firebase.json` — **deny-all** client access rules (decision:
+  all reads/writes go through the Express API; see §4.1).
+- `src/middleware/rateLimit.js` — in-memory fixed-window limiter (auth + money routes).
+- `test/*` — unit tests (`npm test`, Node built-in `node:test`).
 - `CLOUD_RUN_DEPLOYMENT.md` — this doc.
 - `deploy.cloudrun.sh` — one-command deploy helper.
 
@@ -79,6 +83,15 @@ If you add image uploads later, store bytes in **Cloud Storage** and keep only t
 5. **Secret Manager** (Razorpay + Firebase SA secrets — recommended).
 6. *(Optional)* **Cloud Storage** for uploads only.
 
+## 4.1 Firestore security rules — decision
+
+All app reads/writes go through this Express API (Cloud Run, Admin SDK). The
+`firestore.rules` file is **deny-all** (`allow read, write: if false`) so a
+future accidental client-side Firestore connection can't expose paid prompt
+text, PII, or the ledger. If the mobile app ever reads Firestore directly, relax
+only the specific collections/fields it needs and keep writes server-side.
+Rules + indexes deploy together via `npx firebase deploy --only firestore`.
+
 ## 5. Required environment variables
 
 Set these on the Cloud Run service (recommended: sensitive ones via Secret Manager):
@@ -117,7 +130,7 @@ gcloud auth application-default login   # local dev creds
 
 # Enable Firestore Native mode via console, then:
 npx firebase login
-npx firebase deploy --only firestore:indexes   # creates Firestore composite indexes
+npx firebase deploy --only firestore   # creates composite indexes + applies deny-all rules
 ```
 
 Create the service-account and give it Firestore data access:
@@ -177,7 +190,7 @@ env-configurable `buildConfigField` in the migration; it's already wired to
 
 1. Enable Firestore (Native) + Firebase Auth in your GCP project.
 2. Create the service account + Secret Manager secrets listed in §5.
-3. `firebase deploy --only firestore:indexes`.
+3. `firebase deploy --only firestore` (indexes + deny-all rules).
 4. Add the Firebase Android (`google-services.json`) / Web config to the client and
    implement sign-in; the backend `requireAuth` already verifies ID tokens and maps
    UID → user.
@@ -185,6 +198,8 @@ env-configurable `buildConfigField` in the migration; it's already wired to
    path — `/auth/dev/login` is disabled in production).
 6. Update the Razorpay webhook URL to `.../webhooks/razorpay`.
 7. `npm run db:seed` once against Firestore for the starter plans/prompts.
+8. Run `npm test` before deploy — unit tests cover prompt metrics, signature
+   verification, and the rate limiter (no DB needed).
 
 ## 11. Endpoint inventory (unchanged)
 
@@ -194,6 +209,7 @@ POST /auth/login                 (new — Firebase)
 POST /auth/dev/login             (dev only)
 GET  /prompts                    (?category, ?paid, ?sort, ?q, ?limit, ?offset)
 GET  /prompts/:id
+POST /prompts                    (creator publish — plan gates, owner = caller)
 POST /prompts/:id/save
 POST /prompts/:id/unsave
 GET  /me/profile
