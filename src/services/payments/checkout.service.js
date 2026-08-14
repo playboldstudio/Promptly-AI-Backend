@@ -2,42 +2,16 @@ import { COLS, findByPk, inTxGet, inTxSet } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
 import { razorpay, verifyPaymentSignature } from '../../lib/razorpay.js';
 import { writeLedger } from '../ledger.js';
-import { currentActiveSubscriptionWithPlan } from './_subs.js';
+import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 
-/**
- * PAID PROMPT SALES — Razorpay Checkout into the platform's account.
- *
- * Flow:
- *   1. POST /payments/checkout/order  → createCheckoutOrder():
- *        - validates the prompt is paid + published
- *        - enforces ONE UNLOCK per buyer (no duplicate orders if already purchased)
- *        - reads the BUYER's subscription platform_fee_percent (Pro=5%, Creator=0%)
- *        - freezes the financial snapshot (price / fee / net) right now
- *        - calls Razorpay Orders API → { order_id, amount, currency }
- *        - returns the order to the app, which opens Razorpay Checkout
- *   2. The app sends the payment response back → POST /payments/checkout/verify
- *        - verifies the Razorpay payment_signature (HMAC, server-side)
- *        - double-checks the captured amount matches the order
- *        - unlockPrompt() writes the PromptPurchase + ledger rows (Firestore tx)
- *
- * All money is integer rupees. `netInr` is frozen at sale time so historical
- * accuracy survives fee changes.
- */
-
-/** Amount razorpay orders expect (paise) for a given rupee amount. */
 function inPaise(rupees) {
   return Math.round(rupees * 100);
 }
 
-/** Deterministic doc id for a purchase — enforces one-unlock-per-buyer-per-prompt. */
 function purchaseIdFor(buyerId, promptId) {
   return `${buyerId}_${promptId}`;
 }
 
-/**
- * Phase 1 — create a Razorpay order for a paid prompt.
- * @returns {{ orderId, amountInr, currency, feePercent, feeInr, netInr, prompt }}
- */
 export async function createCheckoutOrder({ buyerId, promptId }) {
   const prompt = await findByPk(COLS.prompts, promptId);
   if (!prompt || prompt.status !== 'published') {
@@ -86,7 +60,6 @@ export async function createCheckoutOrder({ buyerId, promptId }) {
 
 /**
  * Phase 2 — verify the payment signature, then unlock the prompt.
- * Called by the app with the fields Razorpay Checkout returns on success.
  */
 export async function verifyAndUnlock({
   buyerId,
@@ -135,8 +108,7 @@ export async function verifyAndUnlock({
 }
 
 /**
- * Write the PromptPurchase + ledger rows for a completed sale.
- * Wrapped in a Firestore transaction so money rows are all-or-nothing.
+ * Write the PromptPurchase + ledger rows for a completed sale in one transaction.
  */
 async function unlockPrompt({ buyerId, promptId, orderId, paymentId, priceInr }) {
   const prompt = await findByPk(COLS.prompts, promptId);

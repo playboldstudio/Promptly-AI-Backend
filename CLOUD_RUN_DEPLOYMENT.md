@@ -16,7 +16,7 @@ and **Razorpay** for payments (unchanged).
 - `.dockerignore` — excludes secrets, node_modules, local git/config.
 - `src/db/firestore.js` — Firebase Admin init (Firestore + Auth digests).
 - `src/db/firestoreRepo.js` — Firestore data-access helpers (transactions, queries).
-- `src/services/payments/_subs.js` — shared subscription-with-plan reader.
+- `src/services/payments/subscription-utils.js` — shared subscription-with-plan reader.
 - `firestore.indexes.json` — required composite indexes.
 - `firestore.rules` + `firebase.json` — **deny-all** client access rules (decision:
   all reads/writes go through the Express API; see §4.1).
@@ -39,7 +39,6 @@ and **Razorpay** for payments (unchanged).
   for every money mutation (unlock, payout reserve, activation, payout-fail reversal).
 - `package.json` → added `firebase-admin`, removed `pg`, `pg-hstore`, `sequelize`.
 - `.env.example` → Firestore/Cloud Run variables (names only, no secrets).
-- `scripts/*` → port 8080 + Firestore cleanup.
 
 **Removed**
 - All Sequelize model files under `src/db/models/` and `src/db/models.js`.

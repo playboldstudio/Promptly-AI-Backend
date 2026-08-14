@@ -21,7 +21,6 @@ const paging = (req) => ({
   offset: Math.max(Number(req.query.offset) || 0, 0),
 });
 
-/** GET /me/profile — profile + current subscription + KYC state. */
 router.get('/profile', async (req, res, next) => {
   try {
     const profile = await getProfile(req.userId);
@@ -31,7 +30,6 @@ router.get('/profile', async (req, res, next) => {
   }
 });
 
-/** GET /me/prompts — prompts the user published. */
 router.get('/prompts', async (req, res, next) => {
   try {
     const result = await getMyPrompts(req.userId, paging(req));
@@ -41,7 +39,6 @@ router.get('/prompts', async (req, res, next) => {
   }
 });
 
-/** GET /me/saved — saved prompts (join table). */
 router.get('/saved', async (req, res, next) => {
   try {
     const result = await getSavedPrompts(req.userId, paging(req));
@@ -51,7 +48,6 @@ router.get('/saved', async (req, res, next) => {
   }
 });
 
-/** GET /me/transactions — the My Account ledger, newest first. */
 router.get('/transactions', async (req, res, next) => {
   try {
     const result = await getTransactions(req.userId, paging(req));
@@ -61,7 +57,6 @@ router.get('/transactions', async (req, res, next) => {
   }
 });
 
-/** GET /me/earnings — creator earnings summary (lifetime, withdrawn, pending, balance). */
 router.get('/earnings', async (req, res, next) => {
   try {
     const summary = await getEarningsSummary(req.userId);
@@ -71,7 +66,6 @@ router.get('/earnings', async (req, res, next) => {
   }
 });
 
-/** GET /me/earnings/prompts — per-prompt earnings breakdown. */
 router.get('/earnings/prompts', async (req, res, next) => {
   try {
     const rows = await getEarningsByPrompt(req.userId);
@@ -81,7 +75,6 @@ router.get('/earnings/prompts', async (req, res, next) => {
   }
 });
 
-/** POST /me/upi — save the UPI ID the admin pays withdrawals to. */
 router.post('/upi', async (req, res, next) => {
   try {
     const parsed = upiSchema.safeParse(req.body ?? {});

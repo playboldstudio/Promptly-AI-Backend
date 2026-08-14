@@ -10,7 +10,6 @@ import {
 } from '../services/prompts.service.js';
 import { optionalAuth, requireAuth } from '../middleware/auth.js';
 
-// Mirrors the Prompt.category enum in src/db/models/Prompt.js.
 const PROMPT_CATEGORIES = [
   'portrait',
   'fashion',
@@ -45,7 +44,6 @@ const createPromptSchema = z
  * POST /prompts — creator publish. Authenticated; authorId is the caller.
  * Gates: daily post limit from the plan (Free=3/day, Pro/Creator unlimited)
  * and paid prompts require the Creator plan (canPostPaid).
- * Body: { title, description, promptText, imageUrl?, category, tags?, isPaid, priceInr? }
  */
 router.post('/prompts', requireAuth, async (req, res, next) => {
   try {
@@ -70,13 +68,8 @@ router.post('/prompts', requireAuth, async (req, res, next) => {
 
 /**
  * GET /prompts
- * Query params:
- *   category  — PromptCategory enum value
- *   paid      — "free" | "paid"
- *   sort      — "trending" | "new" | "recent"
- *   q         — search text (title/description/tags)
- *   limit     — page size (default 50)
- *   offset    — page offset (default 0)
+ * Query params: category, paid ("free"|"paid"), sort (trending|new|recent),
+ * q, limit, offset.
  */
 // Optional auth → each row is annotated with savedByMe for the signed-in viewer.
 router.get('/prompts', optionalAuth, async (req, res, next) => {
@@ -112,9 +105,7 @@ router.get('/prompts', optionalAuth, async (req, res, next) => {
 });
 
 /**
- * GET /prompts/:id
- * Optional auth — a signed-in viewer unlocks the paid prompt text if they own it
- * or have a completed purchase. Free prompts always include prompt_text.
+ * GET /prompts/:id — optional auth unlocks paid prompt text for owners/buyers.
  */
 router.get('/prompts/:id', optionalAuth, async (req, res, next) => {
   try {
@@ -135,8 +126,7 @@ router.get('/prompts/:id', optionalAuth, async (req, res, next) => {
 });
 
 /**
- * POST /prompts/:id/save — save a prompt for the signed-in user.
- * Idempotent. Returns { saved, saveCount } for the UI to update the button/counter.
+ * POST /prompts/:id/save — idempotent. Returns { saved, saveCount }.
  */
 router.post('/prompts/:id/save', requireAuth, async (req, res, next) => {
   try {
@@ -153,8 +143,7 @@ router.post('/prompts/:id/save', requireAuth, async (req, res, next) => {
 });
 
 /**
- * POST /prompts/:id/unsave — remove the save. Idempotent.
- * Returns { saved: false, saveCount } so the UI can flip the button back.
+ * POST /prompts/:id/unsave — idempotent. Returns { saved: false, saveCount }.
  */
 router.post('/prompts/:id/unsave', requireAuth, async (req, res, next) => {
   try {

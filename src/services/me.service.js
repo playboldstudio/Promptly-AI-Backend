@@ -5,11 +5,8 @@ import {
   getMany,
   upsert,
 } from '../db/firestoreRepo.js';
-import { currentActiveSubscriptionWithPlan } from './payments/_subs.js';
+import { currentActiveSubscriptionWithPlan } from './payments/subscription-utils.js';
 
-/**
- * Profile for the signed-in user: profile fields + current subscription + KYC state.
- */
 export async function getProfile(userId) {
   const [subscription, kyc] = await Promise.all([
     currentActiveSubscriptionWithPlan(userId),
@@ -24,9 +21,6 @@ export async function getProfile(userId) {
   };
 }
 
-/**
- * Prompts the user has published (their catalog rows). Maps to the UI "My Prompts".
- */
 export async function getMyPrompts(userId, { limit = 50, offset = 0 } = {}) {
   const all = await queryAll({
     collection: COLS.prompts,
@@ -38,9 +32,6 @@ export async function getMyPrompts(userId, { limit = 50, offset = 0 } = {}) {
   return { prompts, total: all.rows.length };
 }
 
-/**
- * Prompts the user has saved (join table → prompt rows). Maps to the UI "Saved".
- */
 export async function getSavedPrompts(userId, { limit = 50, offset = 0 } = {}) {
   const all = await queryAll({
     collection: COLS.savedPrompts,
@@ -85,9 +76,6 @@ export async function getSavedPrompts(userId, { limit = 50, offset = 0 } = {}) {
   return { saved, total: sorted.length };
 }
 
-/**
- * The My Account ledger — one row per transaction, newest first.
- */
 export async function getTransactions(userId, { limit = 50, offset = 0 } = {}) {
   const all = await queryAll({
     collection: COLS.transactions,
@@ -99,9 +87,6 @@ export async function getTransactions(userId, { limit = 50, offset = 0 } = {}) {
   return { transactions, total: all.rows.length };
 }
 
-/**
- * Save the user's UPI payout destination on their profile.
- */
 export async function setUpiId(userId, upiId) {
   await upsert(COLS.users, userId, { upiId, updatedAt: new Date() });
   return findByPk(COLS.users, userId);

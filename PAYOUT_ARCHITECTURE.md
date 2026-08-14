@@ -6,8 +6,8 @@
 > users earn, then withdraw to their UPI — an **admin approves the request and
 > transfers from the admin's own UPI app**, then marks it paid/failed.
 >
-> This is the design implemented by `src/services/payments/*`, `src/routes/*` and
-> `src/db/models/*`. Match the Android app contract in the `Promptly-AI` repo.
+> This is the design implemented by `src/services/payments/*` and `src/routes/*`.
+> Match the Android app contract in the `Promptly-AI` repo.
 >
 > Companion to the repo README's "Money model" section.
 
@@ -146,10 +146,6 @@ Any user can publish free prompts. To **earn from paid prompts** the account nee
 
 > The UPI ID is **snapshotted onto the payout row at request time**, so the creator
 > changing UPI later never redirects a pending payment.
->
-> TODO (backend): the current `requestPayout()` checks the saved UPI and balance but
-> **hasn't yet gated on an active paid subscription** — add GATE 1 below in
-> `src/services/payments/payouts.service.js`.
 
 ---
 

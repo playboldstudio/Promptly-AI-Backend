@@ -2,15 +2,14 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { db, toTimestamp, fromTimestamp } from './firestore.js';
 
 /**
- * Thin Firestore data-access helpers.
+ * Firestore data-access helpers.
  *
- * Naming/formatting conventions to preserve the existing API:
- *  - Doc fields are stored camelCase (same names the Sequelize models exposed),
- *    so responses keep the exact shapes the Android/Web client already parses.
- *  - Timestamps are stored as Firestore Timestamps and normalized to ISO strings
- *    on read, matching Sequelize's Date serialisation.
- *  - `toObject` returns { id, ...fields } with a null `_fieldValue_` guard so we
- *    never leak `FieldValue` sentinels.
+ * Conventions:
+ *  - Doc fields are camelCase, so responses keep the shapes the clients parse.
+ *  - Timestamps are stored as Firestore Timestamps and normalized to ISO
+ *    strings on read.
+ *  - `toObject` returns { id, ...fields } with a null guard so we never leak
+ *    `FieldValue` sentinels.
  */
 
 const COLLECTIONS = Object.freeze({

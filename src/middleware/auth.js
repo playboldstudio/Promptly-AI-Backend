@@ -5,17 +5,14 @@ import { env } from '../config/env.js';
 /**
  * Firebase Authentication middleware.
  *
- * The client signs in with Firebase Auth (Android/Web) and sends the resulting
- * ID token as `Authorization: Bearer <token>`. We verify it with the Admin SDK
- * (the JWT's signature, expiry and audience are all checked server-side), then
- * resolve the Firebase UID → the user's Firestore doc, lazily creating/refreshing
- * it from the token's claims (uid, email, name, photo). Never trust a raw UID
- * from the client.
+ * The client signs in with Firebase Auth and sends the resulting ID token as
+ * `Authorization: Bearer <token>`. We verify it with the Admin SDK (signature,
+ * expiry, audience), then resolve the Firebase UID → the user's Firestore doc,
+ * lazily creating/refreshing it from the token claims.
  *
- * In development only, the legacy dev token (a bare user id) is also accepted
- * so local/emulator work keeps working without a Firebase sign-in.
+ * In development only, the legacy dev token (a bare user id) is also accepted.
  *
- * Attaches `req.user` (user doc) and `req.userId` (the Firestore doc id = uid).
+ * Attaches `req.user` (user doc) and `req.userId` (Firestore doc id = uid).
  */
 
 function unauthorized(next, message) {
@@ -24,13 +21,8 @@ function unauthorized(next, message) {
   return next(err);
 }
 
-/** Legacy dev token: a bare UUID. Accepted only outside production. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/**
- * Verify a Bearer token and resolve the user doc.
- * Returns { user, userId } on success, or throws { status: 401 }.
- */
 async function resolveUser(token) {
   if (!token) {
     const e = new Error('Authentication required — send Authorization: Bearer <token>');
@@ -38,12 +30,10 @@ async function resolveUser(token) {
     throw e;
   }
 
-  // Production: only signed Firebase ID tokens are accepted.
   if (env.NODE_ENV === 'production') {
     return verifyFirebaseToken(token);
   }
 
-  // Development convenience: legacy bare-user-id token.
   if (UUID_RE.test(token)) {
     const user = await findByPk(COLS.users, token);
     if (!user) {
@@ -62,7 +52,6 @@ async function verifyFirebaseToken(token) {
     const decoded = await firebaseAuth.verifyIdToken(token, true);
     const uid = decoded.uid;
 
-    // Lazy upsert / refresh the user doc from the verified token claims.
     const existing = await findByPk(COLS.users, uid);
     const patch = {
       authProviderId: uid,
@@ -99,8 +88,7 @@ export async function requireAuth(req, _res, next) {
 
 /**
  * Optional auth — attaches req.user when a valid Bearer token is present,
- * otherwise continues as anonymous. Used by prompt detail (paid prompts unlock
- * only for signed-in users). Invalid tokens are treated as anonymous here.
+ * otherwise continues as anonymous. Invalid tokens are treated as anonymous.
  */
 export async function optionalAuth(req, _res, next) {
   try {

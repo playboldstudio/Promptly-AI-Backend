@@ -7,10 +7,9 @@ test
 !.env.example
 .git
 .gitignore
-render.yaml
 README.md
+CLOUD_RUN_DEPLOYMENT.md
 PAYOUT_ARCHITECTURE.md
-DATABASE_SCHEMA.md
 *.log
 .DS_Store
 

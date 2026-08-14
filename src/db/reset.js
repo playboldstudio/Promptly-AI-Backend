@@ -2,11 +2,8 @@ import { db } from './firestore.js';
 import { COLS } from './firestoreRepo.js';
 
 /**
- * `npm run db:reset` — DESTRUCTIVE. Deletes every document in every collection
- * the app uses, then re-seeds. Firestore has no "drop table"; clearing all docs
- * is the equivalent. Dev-only — never run on a production project.
- *
- * WARNING: deletes ALL data in the given Firestore database.
+ * `npm run db:reset` — DESTRUCTIVE. Clears every collection then re-seeds.
+ * Dev-only — refuses to run in production.
  */
 async function main() {
   if (process.env.NODE_ENV === 'production') {

@@ -195,25 +195,20 @@ RazorpayX involved. `mark-failed` reverses the reservation.
 - Payouts reserve the balance *at request time* — `pending` money can't be double-withdrawn.
 - Webhooks are idempotent: a unique `dedupe_key` (hash of event + payload) makes replays
   no-ops, so a doubled delivery can't double-charge a subscription.
-- ⚠️ `bank_accounts.account_number_full` stores the full account number in **plaintext** for
-  the manual transfer. **Encrypt it before real money** (see "Before launch").
 
 ## Data model
 
-12 tables (see `src/db/models/*.js`): `users`, `subscription_plans`, `user_subscriptions`,
-`prompts`, `user_posts`, `prompt_purchases`, `transactions`, `payouts`, `bank_accounts`,
-`kyc_verifications`, `saved_prompts`, plus `webhook_events` for idempotent Razorpay webhook
-replay.
+Firestore collections (schema-less; see `src/db/firestoreRepo.js` for the
+collection names): `users`, `subscription_plans`, `user_subscriptions`, `prompts`,
+`prompt_purchases`, `transactions`, `payouts`, `saved_prompts`,
+`user_balances`, plus `webhook_events` for idempotent Razorpay webhook replay.
 
-Key invariants baked into the models:
-- One unlock per buyer per prompt → unique index `(buyer_id, prompt_id)`
-- Saved prompts → composite primary key `(user_id, prompt_id)`
-- KYC is 1:1 with users → unique `user_id`
-- Hot queries indexed: `prompts(category, is_paid)`, `prompts(created_at)`,
-  `user_posts(user_id, posted_on)`, `transactions(user_id, created_at)`,
-  `prompt_purchases(author_id)`
-- Daily post limit derives from `COUNT(user_posts WHERE posted_on = today)` — no counter
-  column to drift.
+Key invariants enforced by the service layer:
+- One unlock per buyer per prompt → deterministic doc id `(buyer_id, prompt_id)`
+- Saved prompts → composite id `(user_id, prompt_id)`
+- Hot queries indexed: `prompts(status, createdAt)`, `prompts(authorId, createdAt)`,
+  `transactions(userId, createdAt)`, `prompt_purchases(authorId, status)`
+- Daily post limit derives from `COUNT(prompts WHERE authorId AND createdAt = today)`
 
 ### Metrics & how they're computed
 
@@ -256,7 +251,6 @@ src/
 
 - **Admin role gating** — `/payments/admin/*` is gated by `ADMIN_EMAILS` (403 for others).
 - Refund flow (`prompt_purchases.status = 'refunded'` → reverse ledger rows)
-- **Encrypt** `bank_accounts.account_number_full` (and the KYC `pan`) — plaintext today, test-mode only
 - RazorpayX Payouts — only if/when you register a **business** account; the manual-settle
   flow is the solo-individual path
 - Distributed rate limiting (the built-in limiter is per-instance in-memory)

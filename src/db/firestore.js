@@ -7,15 +7,8 @@ import { env } from '../config/env.js';
  * Firebase Admin initialization for Cloud Run.
  *
  * Credential resolution (in order):
- *   1. FIREBASE_PRIVATE_KEY + FIREBASE_CLIENT_EMAIL (service-account JSON handed
- *      in via env — e.g. from Secret Manager as individual vars).
- *   2. GOOGLE_APPLICATION_CREDENTIALS (path to a service-account JSON file) or
- *      the Cloud Run metadata server / ADC — Firestore + Cloud Storage are then
- *      authenticated through the runtime service account with no secrets in env.
- *
- * Only the primary `env.FIREBASE_PROJECT_ID` is strictly required by the schema
- * below; a service-account is recommended for production (Secret Manager /
- * volume mount). See README "Deployment" for the recommended setup.
+ *   1. FIREBASE_PRIVATE_KEY + FIREBASE_CLIENT_EMAIL (from Secret Manager).
+ *   2. GOOGLE_APPLICATION_CREDENTIALS / ADC (Cloud Run runtime service account).
  */
 let app;
 

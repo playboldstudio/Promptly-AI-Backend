@@ -2,26 +2,10 @@ import { COLS, queryAll, getMany } from '../db/firestoreRepo.js';
 import { balanceFor } from './ledger.js';
 
 /**
- * Creator earnings — everything derived from prompt_purchases + payouts + ledger.
- *
- * Money model:
- *   Buyer ──(₹, Checkout)──► Platform pool
- *                              │  net = price × (100 − fee%) / 100
- *                              ▼
- *                       Creator balance
- *                              │  withdraw (min ₹60)
- *                              ▼
- *                       Creator's bank
- *
+ * Creator earnings — derived from prompt_purchases + payouts + ledger.
  * All amounts are integer rupees.
  */
 
-/**
- * Per-prompt breakdown for a creator, newest prompts first.
- * totalInr      — sum of netInr across completed sales of that prompt
- * salesCount    — number of completed sales
- * promptTitle   — denormalized title for the UI (authorId match)
- */
 export async function getEarningsByPrompt(authorId) {
   const { rows } = await queryAll({
     collection: COLS.promptPurchases,
@@ -49,12 +33,7 @@ export async function getEarningsByPrompt(authorId) {
 }
 
 /**
- * Earnings summary for a creator:
- *   totalEarnings  — lifetime net from completed sales
- *   withdrawnInr   — sum of completed/processing/paid payout amounts
- *   pendingPayouts — sum of payouts still pending
- *   balanceInr     — available = lifetime ledger balance (credits − debits)
- *   salesCount     — completed sales count
+ * Earnings summary: lifetime net, withdrawn, pending payouts, available balance.
  */
 export async function getEarningsSummary(authorId) {
   const [sales, payoutRows, balance] = await Promise.all([

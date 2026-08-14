@@ -1,11 +1,10 @@
 import crypto from 'node:crypto';
 import { COLS, findByPk, queryAll, remove, upsert, create, getMany, increment } from '../db/firestoreRepo.js';
 import { derivePromptFlags } from './prompt-metrics.js';
-import { currentActiveSubscriptionWithPlan } from './payments/_subs.js';
+import { currentActiveSubscriptionWithPlan } from './payments/subscription-utils.js';
 
-// Fields safe to expose publicly. promptText is intentionally excluded — it is the
-// paid asset and is only revealed to owners/unlockers (see getPromptById).
-// isTrending / isNew are NOT stored — they are derived (see derivePromptFlags).
+// promptText is the paid asset and is only revealed to owners/unlockers
+// (see getPromptById). isTrending / isNew are derived, never stored.
 const PUBLIC_PROMPT_ATTRS = [
   'id',
   'title',
@@ -20,7 +19,6 @@ const PUBLIC_PROMPT_ATTRS = [
   'createdAt',
 ];
 
-// Author info exposed on prompts (no email — avoid leaking PII publicly).
 const AUTHOR_ATTRS = ['id', 'fullName', 'avatarUrl', 'role'];
 
 function serializeAuthor(author) {
@@ -34,7 +32,6 @@ function serializeAuthor(author) {
     : null;
 }
 
-/** Pick only the publicly-safe fields, mirroring the old PUBLIC_PROMPT_ATTRS projection. */
 function toPublicPrompt(json) {
   const out = {};
   for (const k of PUBLIC_PROMPT_ATTRS) out[k] = json[k];
@@ -42,11 +39,9 @@ function toPublicPrompt(json) {
 }
 
 /**
- * List published prompts with the browse filters used by the UI.
- * Firestore has no substring ILIKE or cross-field OR, so we fetch the published
- * set and filter/sort in memory — identical behaviour, fine at this scale.
- * The `trending` sort is derived engagement (not a stored column), so it is
- * computed here too.
+ * List published prompts with the browse filters. Firestore has no substring
+ * or cross-field OR, so the published set is filtered/sorted in memory — fine
+ * at this scale.
  */
 export async function listPrompts({ category, paid, sort, q, viewerId, limit = 50, offset = 0 }) {
   const all = await queryAll({
@@ -108,9 +103,9 @@ export async function listPrompts({ category, paid, sort, q, viewerId, limit = 5
 }
 
 /**
- * Fetch one published prompt by id. `viewerId` (optional) enables paid unlock:
- * the full promptText is returned only when the prompt is free, the viewer owns it,
- * or they have a completed PromptPurchase (unlock) row. Also annotates savedByMe.
+ * Fetch one published prompt. `viewerId` (optional) enables paid unlock: the
+ * full promptText is returned only when the prompt is free, the viewer owns it,
+ * or they have a completed PromptPurchase. Also annotates savedByMe.
  */
 export async function getPromptById(id, viewerId) {
   const prompt = await findByPk(COLS.prompts, id);
@@ -146,13 +141,9 @@ export async function getPromptById(id, viewerId) {
 }
 
 /**
- * Publish a new prompt as the signed-in creator. Sets authorId = the caller
- * (owner). Gates:
- *   - Free plan daily post limit (Free = 3/day from the plan seed; Pro/Creator
- *     have dailyPostLimit null = unlimited).
- *   - Paid prompts require the Creator plan (canPostPaid on the plan).
- * New prompts are published immediately and use a UUID doc id.
- * @returns {{ prompt: object } | {error: {status, message}}}
+ * Publish a new prompt as the signed-in creator (authorId = caller). Gates:
+ * daily post limit from the current plan (Free = 3/day; Pro/Creator unlimited)
+ * and paid prompts require the Creator plan.
  */
 export async function createPrompt({ userId, input }) {
   const user = await findByPk(COLS.users, userId);
@@ -216,7 +207,7 @@ export async function createPrompt({ userId, input }) {
 }
 
 /**
- * Increment a prompt's view count. Fire-and-forget — failures must never fail the request.
+ * Increment a prompt's view count. Fire-and-forget — never fails the request.
  */
 export async function recordPromptView(id) {
   try {
@@ -231,7 +222,7 @@ export async function recordPromptView(id) {
 
 /**
  * Save a prompt for a user (creates the join row + bumps save_count).
- * Idempotent: saving twice is a no-op. Returns the updated save count.
+ * Idempotent. Returns the updated save count.
  */
 export async function savePrompt(promptId, userId) {
   const prompt = await findByPk(COLS.prompts, promptId);
@@ -259,7 +250,7 @@ export async function savePrompt(promptId, userId) {
 }
 
 /**
- * Unsave a prompt for a user (removes the join row + decrements save_count, floor 0).
+ * Unsave a prompt (removes the join row + decrements save_count, floor 0).
  * Idempotent. Returns the updated save count.
  */
 export async function unsavePrompt(promptId, userId) {

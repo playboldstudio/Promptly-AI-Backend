@@ -2,30 +2,14 @@ import { COLS, findByPk, queryAll, update, inTxGet, inTxAdd, inTxSet } from '../
 import { runTransaction } from '../../db/config.js';
 import { env } from '../../config/env.js';
 import { balanceFor, writeLedger } from '../ledger.js';
-import { currentActiveSubscriptionWithPlan } from './_subs.js';
-
-/**
- * CREATOR PAYOUTS — MANUAL SETTLE (solo developer; no RazorpayX).
- *
- *   Creator balance ──(request, min ₹60)──► Payout row (pending, upiId)
- *        admin transfers ₹ to the creator's UPI via their OWN UPI app (NOT Razorpay)
- *        admin marks the payout paid/failed in the app
- *
- * requestPayout({ userId, amountInr }) — writes the Payout + a ledger debit in
- * one Firestore transaction, reserving the balance atomically.
- */
+import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 
 const MIN_WITHDRAWAL_INR = env.MIN_WITHDRAWAL_INR;
 
-/** Return a 4xx-style error object, matching the other services' shape. */
 function err(status, message) {
   return { error: { status, message } };
 }
 
-/**
- * Request a withdrawal. Creates the Payout + reserves the balance atomically.
- * @returns {{ payout } | {error}}
- */
 export async function requestPayout({ userId, amountInr }) {
   if (!Number.isInteger(amountInr) || amountInr <= 0) {
     return err(400, 'Amount must be a positive whole number (rupees)');
@@ -125,7 +109,6 @@ export async function requestPayout({ userId, amountInr }) {
 
 /**
  * Admin — list payout requests with the transfer details the admin needs.
- * @returns {Promise<{ payouts: object[], total: number }>}
  */
 export async function listPayouts({ status, limit = 50, offset = 0 } = {}) {
   const filters = [];
@@ -153,7 +136,6 @@ export async function listPayouts({ status, limit = 50, offset = 0 } = {}) {
 
 /**
  * Admin — mark a pending payout PAID after transferring the money manually.
- * @returns {{ payout } | {error}}
  */
 export async function markPayoutPaid({ payoutId }) {
   const payout = await findByPk(COLS.payouts, payoutId);
@@ -161,18 +143,29 @@ export async function markPayoutPaid({ payoutId }) {
   if (payout.status !== 'pending') {
     return err(409, `Payout is already ${payout.status}`);
   }
-  const updated = await update(COLS.payouts, payoutId, {
-    status: 'paid',
-    processedAt: new Date(),
-    updatedAt: new Date(),
-  });
-  return { payout: updated };
+
+  try {
+    await runTransaction(async (tx) => {
+      const fresh = await inTxGet(tx, COLS.payouts, payoutId);
+      if (!fresh || fresh.status !== 'pending') {
+        throw Object.assign(new Error('already-claimed'), { claimed: true });
+      }
+      inTxSet(tx, COLS.payouts, payoutId, {
+        status: 'paid',
+        processedAt: new Date(),
+        updatedAt: new Date(),
+      });
+    });
+    const updated = await findByPk(COLS.payouts, payoutId);
+    return { payout: updated };
+  } catch (error) {
+    if (error.claimed) return err(409, 'Payout is no longer pending');
+    return { error: { status: 409, message: 'Could not update the payout — try again' } };
+  }
 }
 
 /**
- * Admin — mark a pending payout FAILED (money not sent). The reserved balance
- * is released back to the creator.
- * @returns {{ payout } | {error}}
+ * Admin — mark a pending payout FAILED. The reserved balance is returned.
  */
 export async function markPayoutFailed({ payoutId, reason }) {
   const payout = await findByPk(COLS.payouts, payoutId);

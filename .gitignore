@@ -10,6 +10,14 @@ build/
 .env.local
 .env.*.local
 
+# Service-account keys / credentials — never commit secrets.
+*service-account*.json
+*-service-account*.json
+credentials.json
+key.json
+gcp-key.json
+firebase-sa-key.json
+
 # Logs
 *.log
 npm-debug.log*

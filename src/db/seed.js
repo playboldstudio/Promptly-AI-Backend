@@ -2,14 +2,9 @@ import { pathToFileURL } from 'node:url';
 import { COLS, findByPk, upsert } from '../db/firestoreRepo.js';
 
 /**
- * `npm run db:seed` — idempotent starter data for Firestore.
- *
- * Upserts by deterministic doc id / title:
- *   - 3 subscription plans (free / pro / creator)
- *   - 5 prompts (free + paid mix) with a demo author
- *
- * Firestore has no tables; seeding just sets the docs that other code expects.
- * Safe to re-run — existing docs are merged/updated, not duplicated.
+ * `npm run db:seed` — idempotent starter data for Firestore:
+ * 3 subscription plans, 5 prompts (free + paid), and a demo author.
+ * Safe to re-run — existing docs are merged, not duplicated.
  */
 
 const PLANS = [
@@ -106,7 +101,7 @@ async function main() {
   }
   console.log(`  ✅ ${PLANS.length} subscription plans`);
 
-  // Demo author user (matches the previous "demo@promptly.app" creator).
+  // Demo author user (matches the demo creator).
   await upsert(COLS.users, DEMO_USER_ID, {
     authProviderId: 'demo@promptly.app',
     email: 'demo@promptly.app',

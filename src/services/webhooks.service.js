@@ -5,17 +5,11 @@ import { activateSubscription, deactivateSubscription } from './payments/subscri
 
 /**
  * Razorpay webhook handling: verify → log idempotently → dispatch.
- *
- * Idempotency: every event is logged with a dedupe_key = the Firestore doc id
- * (sha256 of event_name + canonical payload). Replays find the same doc and are
- * skipped — a webhook that fires twice can't double-charge a subscription.
- *
- * Handlers mutate DB rows. The event is marked processedAt ONLY AFTER the
- * handler succeeds; a handler error leaves processedAt null so the next
- * dispatch attempt re-runs it (at-least-once, not exactly-once).
+ * The dedupe key IS the doc id (sha256 of event + payload), so replays are
+ * skipped. `processedAt` is set only after the handler succeeds; a failure
+ * leaves it null so the next delivery re-runs it (at-least-once).
  */
 
-/** Canonical string used for the dedupe key — stable across replays. */
 function dedupeKeyFor(eventName, payload) {
   return crypto
     .createHash('sha256')
@@ -23,15 +17,6 @@ function dedupeKeyFor(eventName, payload) {
     .digest('hex');
 }
 
-/**
- * Verify signature, record the event (idempotently), and dispatch to the right
- * handler. Returns { status: 'verified'|'replay'|'ignored' }.
- * Signature failure THROWS (403) — the route returns 401 to Razorpay.
- *
- * @param {string} rawBody the raw request body string (for HMAC)
- * @param {string} signature the X-Razorpay-Signature header
- * @param {object} body parsed JSON body
- */
 export async function handleWebhook({ rawBody, signature, body }) {
   // 1. Signature check — reject anything that isn't genuinely from Razorpay.
   if (!verifyWebhookSignature(rawBody, signature)) {

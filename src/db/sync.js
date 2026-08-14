@@ -1,12 +1,8 @@
 import { pingDb } from './config.js';
 
 /**
- * `npm run db:sync`
- *
- * Firestore is schemaless — there are no tables/migrations to run. Collections
- * are created implicitly on first write. This script verifies the database is
- * reachable and lists the collections the app uses, so a deploy can sanity-check
- * connectivity before boot.
+ * `npm run db:sync` — Firestore is schemaless; this verifies connectivity so a
+ * deploy can sanity-check before boot.
  */
 async function main() {
   console.log('Checking Firestore connectivity…');

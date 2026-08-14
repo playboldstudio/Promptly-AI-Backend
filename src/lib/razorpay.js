@@ -5,10 +5,8 @@ import { env } from '../config/env.js';
 /**
  * Razorpay client + signature helpers.
  *
- * The client is created LAZILY — Razorpay only needs to exist once keys are
- * present. (Both key_id and key_secret are validated as present by
- * src/config/env.js / hasRazorpayKeys.) This lets the app boot in local dev and
- * on Cloud Run even when the keys are temporarily unset (payment routes return 501).
+ * The client is created lazily so the app boots even when the keys are unset
+ * (payment routes return 501 via hasRazorpayKeys).
  */
 
 let _client = null;
@@ -28,14 +26,13 @@ function getClient() {
   return _client;
 }
 
-/** The Razorpay client (throws 501 when keys are unset). */
 export function razorpay() {
   return getClient();
 }
 
 /**
  * Verify a Razorpay webhook signature (HMAC-SHA256 of the raw body with the
- * webhook secret). Returns true/false. Must be called with the RAW body string.
+ * webhook secret). Must be called with the RAW body string.
  */
 export function verifyWebhookSignature(rawBody, signature) {
   if (!env.RAZORPAY_WEBHOOK_SECRET || !signature) return false;
@@ -50,9 +47,8 @@ export function verifyWebhookSignature(rawBody, signature) {
 }
 
 /**
- * Verify a payment_signature returned by Razorpay Checkout (from the order + payment).
- * This is the common pattern: Razorpay returns `razorpay_payment_id`,
- * `razorpay_order_id`, `razorpay_signature` after a successful payment.
+ * Verify a payment_signature returned by Razorpay Checkout
+ * (`order_id|payment_id` signed with the key secret).
  */
 export function verifyPaymentSignature({ orderId, paymentId, signature }) {
   if (!signature || !orderId || !paymentId) return false;
