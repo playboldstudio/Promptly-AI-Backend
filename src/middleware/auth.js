@@ -53,12 +53,19 @@ async function verifyFirebaseToken(token) {
     const uid = decoded.uid;
 
     const existing = await findByPk(COLS.users, uid);
+    // Fill-in-if-missing: token claims seed a NEW profile, but never overwrite
+    // values the user has since edited (fullName / avatarUrl via PATCH profile).
     const patch = {
       authProviderId: uid,
       email: decoded.email ?? existing?.email ?? '',
       fullName:
-        decoded.name ?? decoded.displayName ?? existing?.fullName ?? decoded.email?.split('@')[0] ?? 'User',
-      avatarUrl: decoded.picture ?? decoded.photoURL ?? existing?.avatarUrl ?? null,
+        existing?.fullName?.trim()
+          ? existing.fullName
+          : decoded.name ?? decoded.displayName ?? decoded.email?.split('@')[0] ?? 'User',
+      avatarUrl:
+        existing?.avatarUrl
+          ? existing.avatarUrl
+          : decoded.picture ?? decoded.photoURL ?? null,
       updatedAt: new Date(),
     };
     if (!existing) patch.createdAt = new Date();

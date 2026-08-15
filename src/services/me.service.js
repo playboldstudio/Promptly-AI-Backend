@@ -91,3 +91,14 @@ export async function setUpiId(userId, upiId) {
   await upsert(COLS.users, userId, { upiId, updatedAt: new Date() });
   return findByPk(COLS.users, userId);
 }
+
+export async function updateProfile(userId, patch) {
+  const fields = {};
+  if (patch.fullName !== undefined) fields.fullName = patch.fullName;
+  if (patch.bio !== undefined) fields.bio = patch.bio;
+  if (patch.avatarUrl !== undefined) fields.avatarUrl = patch.avatarUrl;
+  if (patch.upiId !== undefined) fields.upiId = patch.upiId;
+  fields.updatedAt = new Date();
+  await upsert(COLS.users, userId, fields);
+  return findByPk(COLS.users, userId);
+}

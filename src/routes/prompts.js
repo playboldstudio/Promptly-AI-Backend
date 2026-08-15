@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, raw } from 'express';
 import { z } from 'zod';
 import {
   listPrompts,
@@ -9,6 +9,7 @@ import {
   createPrompt,
 } from '../services/prompts.service.js';
 import { optionalAuth, requireAuth } from '../middleware/auth.js';
+import { uploadImage } from '../services/storage.service.js';
 
 const PROMPT_CATEGORIES = [
   'portrait',
@@ -43,7 +44,7 @@ const createPromptSchema = z
 /**
  * POST /prompts — creator publish. Authenticated; authorId is the caller.
  * Gates: daily post limit from the plan (Free=3/day, Pro/Creator unlimited)
- * and paid prompts require the Creator plan (canPostPaid).
+ * and paid prompts require the Pro or Creator plan (canPostPaid).
  */
 router.post('/prompts', requireAuth, async (req, res, next) => {
   try {
@@ -65,6 +66,34 @@ router.post('/prompts', requireAuth, async (req, res, next) => {
     return next(err);
   }
 });
+
+/**
+ * POST /prompts/image — upload a prompt cover image (raw body, e.g. image/jpeg).
+ * Returns { imageUrl } — pass that URL to POST /prompts as imageUrl.
+ */
+router.post(
+  '/prompts/image',
+  requireAuth,
+  raw({ type: 'image/*', limit: '3mb' }),
+  async (req, res, next) => {
+    try {
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        const err = new Error('Send the image file as the raw request body (image/jpeg, image/png, …)');
+        err.status = 400;
+        return next(err);
+      }
+      const contentType = String(req.headers['content-type'] ?? 'image/jpeg').split(';')[0].trim();
+      const imageUrl = await uploadImage({
+        folder: `prompts/${req.userId}`,
+        buffer: req.body,
+        contentType,
+      });
+      return res.status(201).json({ imageUrl });
+    } catch (err) {
+      return next(err);
+    }
+  },
+);
 
 /**
  * GET /prompts
