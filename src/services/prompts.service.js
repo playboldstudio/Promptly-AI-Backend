@@ -143,7 +143,7 @@ export async function getPromptById(id, viewerId) {
 /**
  * Publish a new prompt as the signed-in creator (authorId = caller). Gates:
  * daily post limit from the current plan (Free = 3/day; Pro/Creator unlimited)
- * and paid prompts require the Creator plan.
+ * and paid prompts require the Pro or Creator plan.
  */
 export async function createPrompt({ userId, input }) {
   const user = await findByPk(COLS.users, userId);
@@ -171,9 +171,9 @@ export async function createPrompt({ userId, input }) {
     }
   }
 
-  // GATE — paid prompts need the Creator plan (canPostPaid).
+  // GATE — paid prompts need a paid plan with canPostPaid (Pro or Creator).
   if (input.isPaid && !plan?.canPostPaid) {
-    return { error: { status: 403, message: 'Paid prompts require the Creator plan' } };
+    return { error: { status: 403, message: 'Paid prompts require the Pro or Creator plan' } };
   }
 
   const id = crypto.randomUUID();

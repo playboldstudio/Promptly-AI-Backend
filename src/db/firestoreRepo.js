@@ -186,6 +186,24 @@ export function inTxGet(tx, collection, id) {
   return tx.get(db.collection(collection).doc(id)).then((s) => toObject(s));
 }
 
+/** Run a filtered query inside a transaction — returns rows (read-only). */
+export function inTxQueryAll(tx, { collection, filters = [], orderBy, limit = 50, offset = 0 }) {
+  let ref = db.collection(collection);
+  for (const f of filters) {
+    ref = ref.where(f.field, f.op ?? '==', f.value);
+  }
+  if (orderBy) {
+    ref = ref.orderBy(orderBy.field, orderBy.direction ?? 'desc');
+  }
+  if (offset > 0) ref = ref.offset(offset);
+  if (limit > 0) ref = ref.limit(limit);
+  return tx.get(ref).then((snap) => {
+    const rows = [];
+    snap.forEach((s) => rows.push(toObject(s)));
+    return rows;
+  });
+}
+
 /** Read a doc ref's object inside a transaction. */
 export function inTxGetRef(tx, ref) {
   return tx.get(ref).then((s) => toObject(s));

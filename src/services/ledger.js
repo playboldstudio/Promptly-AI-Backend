@@ -1,5 +1,5 @@
 import { FieldValue } from 'firebase-admin/firestore';
-import { COLS, inTxAdd, inTxGet, findByPk } from '../db/firestoreRepo.js';
+import { COLS, inTxAdd, inTxGet, inTxSet, findByPk } from '../db/firestoreRepo.js';
 
 /**
  * Ledger helpers — every credit/debit is one row in `transactions` with the
@@ -7,9 +7,11 @@ import { COLS, inTxAdd, inTxGet, findByPk } from '../db/firestoreRepo.js';
  * All amounts are integer rupees. MUST run inside a Firestore transaction.
  */
 
-export async function writeLedger(tx, { userId, type, direction, amountInr, refId, note }) {
-  const balanceDoc = await inTxGet(tx, COLS.userBalances, userId);
-  const prevBalance = Number(balanceDoc?.balanceInr ?? 0);
+export async function writeLedger(tx, { userId, type, direction, amountInr, refId, note, balanceInr }) {
+  // Firestore forbids reads AFTER writes inside a transaction, so callers that
+  // write before the ledger must pre-read the balance and pass it here.
+  const prevBalance =
+    balanceInr ?? Number((await inTxGet(tx, COLS.userBalances, userId))?.balanceInr ?? 0);
   const balanceAfterInr =
     direction === 'credit' ? prevBalance + amountInr : prevBalance - amountInr;
 
@@ -21,6 +23,8 @@ export async function writeLedger(tx, { userId, type, direction, amountInr, refI
     balanceAfterInr,
     refId: refId ?? null,
     note,
+    createdAt: new Date(),
+    updatedAt: new Date(),
   });
 
   // Keep the aggregate balance in sync (absolute write inside the tx is atomic).

@@ -1,4 +1,4 @@
-import { COLS, findByPk, queryAll, update, inTxGet, inTxAdd, inTxSet } from '../../db/firestoreRepo.js';
+import { COLS, findByPk, queryAll, inTxGet, inTxAdd, inTxSet, inTxQueryAll } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
 import { env } from '../../config/env.js';
 import { balanceFor, writeLedger } from '../ledger.js';
@@ -34,17 +34,8 @@ export async function requestPayout({ userId, amountInr }) {
   }
 
   // GATE 5 — one in-flight withdrawal at a time (idempotency).
-  const inFlight = await queryAll({
-    collection: COLS.payouts,
-    filters: [
-      { field: 'userId', value: userId },
-      { field: 'status', op: 'in', value: ['pending', 'processing'] },
-    ],
-    limit: 1,
-  });
-  if (inFlight.rows.length) {
-    return err(409, 'You already have a withdrawal in progress — wait for it to settle');
-  }
+  // Soft-pre-check for a fast 409; the authoritative check runs inside the
+  // transaction below so two concurrent requests cannot both pass.
 
   const balance = await balanceFor(userId);
   if (amountInr > balance) {
@@ -53,6 +44,19 @@ export async function requestPayout({ userId, amountInr }) {
 
   try {
     const payoutId = await runTransaction(async (tx) => {
+      // Authoritative in-flight check inside the transaction (race-safe).
+      const inFlight = await inTxQueryAll(tx, {
+        collection: COLS.payouts,
+        filters: [
+          { field: 'userId', value: userId },
+          { field: 'status', op: 'in', value: ['pending', 'processing'] },
+        ],
+        limit: 1,
+      });
+      if (inFlight.length) {
+        throw Object.assign(new Error('in-flight'), { inFlight: true });
+      }
+
       // Re-check the balance inside the transaction (authoritative).
       const balDoc = await inTxGet(tx, COLS.userBalances, userId);
       const bal = Number(balDoc?.balanceInr ?? 0);
@@ -83,6 +87,7 @@ export async function requestPayout({ userId, amountInr }) {
           amountInr,
           refId: ref.id,
           note: 'Withdrawal request (manual settle via UPI, pending)',
+          balanceInr: bal,
         },
       );
 
@@ -100,6 +105,9 @@ export async function requestPayout({ userId, amountInr }) {
       },
     };
   } catch (error) {
+    if (error.inFlight) {
+      return err(409, 'You already have a withdrawal in progress — wait for it to settle');
+    }
     if (error.insufficient) {
       return err(400, 'Insufficient balance — the amount you requested is no longer available');
     }
@@ -180,6 +188,9 @@ export async function markPayoutFailed({ payoutId, reason }) {
       if (!fresh || fresh.status !== 'pending') {
         throw Object.assign(new Error('already-claimed'), { claimed: true });
       }
+      // Pre-read the balance BEFORE writing so the reversal writes a valid ledger.
+      const balDoc = await inTxGet(tx, COLS.userBalances, payout.userId);
+      const bal = Number(balDoc?.balanceInr ?? 0);
       inTxSet(tx, COLS.payouts, payoutId, {
         status: 'failed',
         processedAt: new Date(),
@@ -196,6 +207,7 @@ export async function markPayoutFailed({ payoutId, reason }) {
           amountInr: payout.amountInr,
           refId: payout.id,
           note: 'Withdrawal failed — balance returned',
+          balanceInr: bal,
         },
       );
     });

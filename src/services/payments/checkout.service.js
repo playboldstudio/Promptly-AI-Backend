@@ -133,6 +133,15 @@ async function unlockPrompt({ buyerId, promptId, orderId, paymentId, priceInr })
       const feeInr = Math.round((priceInr * feePercent) / 100);
       const netInr = priceInr - feeInr;
 
+      // Pre-read both balances BEFORE any write — Firestore transactions cannot
+      // read after a write (writeLedger below only writes when given balances).
+      const [authorBalance, buyerBalance] = await Promise.all([
+        prompt.authorId ? inTxGet(tx, COLS.userBalances, prompt.authorId) : null,
+        inTxGet(tx, COLS.userBalances, buyerId),
+      ]);
+      const authorPrev = Number(authorBalance?.balanceInr ?? 0);
+      const buyerPrev = Number(buyerBalance?.balanceInr ?? 0);
+
       // The purchase row (deterministic id guarantees one-per-buyer-per-prompt).
       inTxSet(tx, COLS.promptPurchases, purchaseId, {
         buyerId,
@@ -149,17 +158,20 @@ async function unlockPrompt({ buyerId, promptId, orderId, paymentId, priceInr })
       });
 
       // Ledger — credit the creator with the net amount.
-      await writeLedger(
-        tx,
-        {
-          userId: prompt.authorId,
-          type: 'paid_prompt_sale',
-          direction: 'credit',
-          amountInr: netInr,
-          refId: purchaseId,
-          note: `Sale of "${prompt.title}"`,
-        },
-      );
+      if (prompt.authorId) {
+        await writeLedger(
+          tx,
+          {
+            userId: prompt.authorId,
+            type: 'paid_prompt_sale',
+            direction: 'credit',
+            amountInr: netInr,
+            refId: purchaseId,
+            note: `Sale of "${prompt.title}"`,
+            balanceInr: authorPrev,
+          },
+        );
+      }
 
       // Ledger — debit the buyer by the price paid.
       await writeLedger(
@@ -171,6 +183,7 @@ async function unlockPrompt({ buyerId, promptId, orderId, paymentId, priceInr })
           amountInr: priceInr,
           refId: purchaseId,
           note: `Unlocked "${prompt.title}"`,
+          balanceInr: buyerPrev,
         },
       );
     });

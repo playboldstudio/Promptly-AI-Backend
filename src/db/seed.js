@@ -9,7 +9,7 @@ import { COLS, findByPk, upsert } from '../db/firestoreRepo.js';
 
 const PLANS = [
   { id: 'free', name: 'Free', priceInr: 0, billingCycle: 'monthly', dailyPostLimit: 3, canPostPaid: false, platformFeePercent: 0 },
-  { id: 'pro', name: 'Pro', priceInr: 49, billingCycle: 'monthly', dailyPostLimit: null, canPostPaid: false, platformFeePercent: 5 },
+  { id: 'pro', name: 'Pro', priceInr: 49, billingCycle: 'monthly', dailyPostLimit: null, canPostPaid: true, platformFeePercent: 5 },
   { id: 'creator', name: 'Creator', priceInr: 99, billingCycle: 'monthly', dailyPostLimit: null, canPostPaid: true, platformFeePercent: 0 },
 ];
 

@@ -77,6 +77,9 @@ export async function activateSubscription(sub) {
     const plan = await findByPk(COLS.subscriptionPlans, planId);
     const docId = `sub_${sub.id}`;
     const existing = await inTxGet(tx, COLS.userSubscriptions, docId);
+    // Pre-read the balance BEFORE any write — Firestore transactions cannot read
+    // after a write (writeLedger below only writes when given the balance).
+    const prevBalance = Number((await inTxGet(tx, COLS.userBalances, userId))?.balanceInr ?? 0);
 
     if (existing) {
       // Renewal — roll current_period_* forward on the same doc; status stays active.
@@ -111,6 +114,7 @@ export async function activateSubscription(sub) {
           amountInr: plan.priceInr,
           refId: docId,
           note: `Subscription — ${plan.name} (₹${plan.priceInr}/month)`,
+          balanceInr: prevBalance,
         },
       );
     }
