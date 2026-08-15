@@ -140,6 +140,12 @@ gcloud iam service-accounts create promptly-ai-sa \
 gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:promptly-ai-sa@$PROJECT_ID.iam.gserviceaccount.com" \
   --role="roles/datastore.user"
+# Also required — the Admin SDK verifies tokens with checkRevoked=true and calls
+# Identity Platform's GetAccountInfo API. Without roles/firebaseauth.admin every
+# /auth/login returns 401 "Invalid or expired Firebase token".
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:promptly-ai-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/firebaseauth.admin"
 ```
 
 ## 7. Deploy to Cloud Run
@@ -148,11 +154,11 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 # Recommended (build from source):
 gcloud run deploy promptly-ai-backend \
   --source . \
-  --region us-central1 \
+  --region us-west1 \
   --allow-unauthenticated \
   --min-instances 0 \
   --max-instances 5 \
-  --set-env-vars NODE_ENV=production,PUBLIC_BASE_URL=https://promptly-ai-backend-<hash>.run.app \
+  --set-env-vars NODE_ENV=production,FIREBASE_PROJECT_ID=$PROJECT_ID,PUBLIC_BASE_URL=https://promptly-ai-backend-<hash>.run.app \
   --set-secrets RAZORPAY_KEY_ID=razorpay-key-id:latest,RAZORPAY_KEY_SECRET=razorpay-key-secret:latest,RAZORPAY_WEBHOOK_SECRET=razorpay-webhook-secret:latest,FIREBASE_PRIVATE_KEY=firebase-private-key:latest,FIREBASE_CLIENT_EMAIL=firebase-client-email:latest,RAZORPAY_PLAN_PRO_ID=razorpay-plan-pro:latest,RAZORPAY_PLAN_CREATOR_ID=razorpay-plan-creator:latest
 ```
 
@@ -163,7 +169,7 @@ Or with `gcloud auth configure-docker` + Buildpacks:
 
 Grab the generated HTTPS URL:
 ```bash
-gcloud run services describe promptly-ai-backend --region us-central1 --format 'value(status.url)'
+gcloud run services describe promptly-ai-backend --region us-west1 --format 'value(status.url)'
 ```
 
 Set it as `PUBLIC_BASE_URL` (and the Android client's `BASE_URL`).
