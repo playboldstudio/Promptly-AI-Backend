@@ -43,6 +43,17 @@ if (!parsed.success) {
 
 export const env = parsed.data;
 
+/** Emails allowed to use the admin back-office (from ADMIN_EMAILS env). */
+export const ADMIN_EMAILS = (env.ADMIN_EMAILS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+/** True when the email belongs to a platform admin (admin back-office access). */
+export function isAdminEmail(email) {
+  return Boolean(email && ADMIN_EMAILS.includes(email));
+}
+
 export const hasRazorpayKeys = Boolean(env.RAZORPAY_KEY_ID && env.RAZORPAY_KEY_SECRET);
 
 export const RAZORPAY_PLAN_BY_ID = {

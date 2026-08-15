@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
-import { hasRazorpayKeys, env } from '../config/env.js';
+import { hasRazorpayKeys, isAdminEmail } from '../config/env.js';
 import { createCheckoutOrder, verifyAndUnlock } from '../services/payments/checkout.service.js';
 import {
   requestPayout,
@@ -23,15 +23,8 @@ const moneyLimiter = rateLimit({ windowMs: 60_000, max: 60, message: 'Too many p
 router.use(requireAuth);
 
 // Admin back-office: only emails listed in ADMIN_EMAILS may settle payouts.
-const adminEmails = new Set(
-  (env.ADMIN_EMAILS || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean),
-);
-
 function requireAdmin(req, res, next) {
-  if (!req.user?.email || !adminEmails.has(req.user.email)) {
+  if (!isAdminEmail(req.user?.email)) {
     const err = new Error('Admin access required');
     err.status = 403;
     return next(err);

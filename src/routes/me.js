@@ -1,6 +1,7 @@
 import { Router, raw } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
+import { isAdminEmail } from '../config/env.js';
 import { getProfile, getMyPrompts, getSavedPrompts, getTransactions, setUpiId, updateProfile } from '../services/me.service.js';
 import { getEarningsSummary, getEarningsByPrompt } from '../services/earnings.service.js';
 import { uploadImage } from '../services/storage.service.js';
@@ -31,7 +32,7 @@ const paging = (req) => ({
 router.get('/profile', async (req, res, next) => {
   try {
     const profile = await getProfile(req.userId);
-    return res.json({ user: req.user, ...profile });
+    return res.json({ user: req.user, isAdmin: isAdminEmail(req.user?.email), ...profile });
   } catch (err) {
     return next(err);
   }
