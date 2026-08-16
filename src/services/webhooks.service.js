@@ -53,7 +53,7 @@ export async function handleWebhook({ rawBody, signature, body }) {
   // 3. Dispatch by event name. Unknown events are logged but ignored
   //    (Razorpay sends plenty — payment.captured, subscription.halted, …).
   try {
-    if (eventName === 'subscription.charged') {
+    if (eventName === 'subscription.activated' || eventName === 'subscription.charged') {
       await activateSubscription(payload.subscription?.entity);
     } else if (eventName === 'subscription.cancelled' || eventName === 'subscription.expired') {
       await deactivateSubscription(payload.subscription?.entity);
