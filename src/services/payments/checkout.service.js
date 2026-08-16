@@ -4,6 +4,12 @@ import { razorpay, verifyPaymentSignature } from '../../lib/razorpay.js';
 import { writeLedger } from '../ledger.js';
 import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 
+/** Money precision: rupees with paise — never more than 2 decimals. */
+function toMoney(value) {
+  return Math.round(value * 100) / 100;
+}
+
+/** Rupees → paise (Razorpay requires whole paise). */
 function inPaise(rupees) {
   return Math.round(rupees * 100);
 }
@@ -32,8 +38,8 @@ export async function createCheckoutOrder({ buyerId, promptId }) {
   const feePercent = sub?.plan?.platformFeePercent ?? 0;
 
   const priceInr = prompt.priceInr;
-  const feeInr = Math.round((priceInr * feePercent) / 100);
-  const netInr = priceInr - feeInr;
+  const feeInr = toMoney((priceInr * feePercent) / 100);
+  const netInr = toMoney(priceInr - feeInr);
 
   const order = await razorpay().orders.create({
     amount: inPaise(priceInr),
@@ -103,7 +109,7 @@ export async function verifyAndUnlock({
     return { error: { status: 400, message: 'Payment amount does not match the order' } };
   }
 
-  const priceInr = Math.round(Number(payment.amount) / 100);
+  const priceInr = Number(payment.amount) / 100;
   return unlockPrompt({ buyerId, promptId, orderId, paymentId, priceInr });
 }
 
@@ -115,7 +121,7 @@ async function unlockPrompt({ buyerId, promptId, orderId, paymentId, priceInr })
   if (!prompt) return { error: { status: 404, message: 'Prompt not found' } };
 
   // Prevents a caller from passing a made-up price while paying the real amount.
-  if (Math.round(Number(priceInr)) !== prompt.priceInr) {
+  if (Number(priceInr) !== prompt.priceInr) {
     return { error: { status: 400, message: 'Price does not match the prompt price' } };
   }
 
@@ -130,8 +136,8 @@ async function unlockPrompt({ buyerId, promptId, orderId, paymentId, priceInr })
       // Recompute the financial snapshot from the *current* buyer fee.
       const sub = await currentActiveSubscriptionWithPlan(buyerId);
       const feePercent = sub?.plan?.platformFeePercent ?? 0;
-      const feeInr = Math.round((priceInr * feePercent) / 100);
-      const netInr = priceInr - feeInr;
+      const feeInr = toMoney((priceInr * feePercent) / 100);
+      const netInr = toMoney(priceInr - feeInr);
 
       // Pre-read both balances BEFORE any write — Firestore transactions cannot
       // read after a write (writeLedger below only writes when given balances).

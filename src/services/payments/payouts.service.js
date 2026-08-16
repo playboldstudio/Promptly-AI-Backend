@@ -9,24 +9,36 @@ const MIN_WITHDRAWAL_INR = env.MIN_WITHDRAWAL_INR;
 /** Flat Razorpay UPI-transfer fee charged on every withdrawal. */
 const RAZORPAY_FEE_PERCENT = 2;
 
+/** GST levied on the Razorpay fee (18% of the 2%). */
+const RAZORPAY_GST_PERCENT = 18;
+
 function err(status, message) {
   return { error: { status, message } };
 }
 
+/** Money precision: rupees with paise — never more than 2 decimals. */
+function toMoney(value) {
+  return Math.round(value * 100) / 100;
+}
+
 /**
  * Fee breakdown for a withdrawal. Fees are DEDUCTED from the requested amount:
- * the admin pays `netInr` to the creator's UPI, the platform keeps the rest.
+ * 2% Razorpay UPI fee + 18% GST on that fee + the plan's platform fee. Every
+ * value is kept to 2 decimal places (paise precision) — no whole-rupee rounding.
+ * The admin pays `netInr` to the creator's UPI, the platform keeps the rest.
  * `platformFeePercent` comes from the creator's plan (Pro=5%, Creator=0%).
  */
 function payoutFees(amountInr, platformFeePercent = 0) {
-  const razorpayFeeInr = Math.round((amountInr * RAZORPAY_FEE_PERCENT) / 100);
-  const platformFeeInr = Math.round((amountInr * (platformFeePercent || 0)) / 100);
-  const feeInr = razorpayFeeInr + platformFeeInr;
+  const razorpayFeeInr = toMoney((amountInr * RAZORPAY_FEE_PERCENT) / 100);
+  const gstInr = toMoney((razorpayFeeInr * RAZORPAY_GST_PERCENT) / 100);
+  const platformFeeInr = toMoney((amountInr * (platformFeePercent || 0)) / 100);
+  const feeInr = toMoney(razorpayFeeInr + gstInr + platformFeeInr);
   return {
     razorpayFeeInr,
+    gstInr,
     platformFeeInr,
     feeInr,
-    netInr: amountInr - feeInr,
+    netInr: toMoney(amountInr - feeInr),
   };
 }
 
@@ -87,8 +99,12 @@ export async function withdrawalEligibility(userId) {
     meetsMinimum,
     currency: 'INR',
     razorpayFeePercent: RAZORPAY_FEE_PERCENT,
+    razorpayGstPercent: RAZORPAY_GST_PERCENT,
     platformFeePercent,
     estimatedFeeInr: fees.feeInr,
+    estimatedRazorpayFeeInr: fees.razorpayFeeInr,
+    estimatedGstInr: fees.gstInr,
+    estimatedPlatformFeeInr: fees.platformFeeInr,
     estimatedNetInr: fees.netInr,
   };
 }
@@ -173,6 +189,7 @@ export async function requestPayout({ userId, amountInr }) {
         razorpayPayoutId: null,
         bankAccountId: null,
         razorpayFeeInr: fees.razorpayFeeInr,
+        gstInr: fees.gstInr,
         platformFeeInr: fees.platformFeeInr,
         feeInr: fees.feeInr,
         netInr: fees.netInr,
@@ -192,7 +209,7 @@ export async function requestPayout({ userId, amountInr }) {
           direction: 'debit',
           amountInr,
           refId: ref.id,
-          note: `Withdrawal — ₹${amountInr} minus ₹${fees.feeInr} fees (2% Razorpay${fees.platformFeeInr ? ` + ${sub?.plan?.platformFeePercent ?? 0}% platform` : ''}), ${fees.netInr} to UPI`,
+          note: `Withdrawal — ₹${amountInr} minus ₹${fees.feeInr} fees (2% Razorpay + 18% GST${fees.platformFeeInr ? ` + ${sub?.plan?.platformFeePercent ?? 0}% platform` : ''}), ${fees.netInr} to UPI`,
           balanceInr: bal,
         },
       );
@@ -208,6 +225,7 @@ export async function requestPayout({ userId, amountInr }) {
         status: payout.status,
         upiId: payout.upiId,
         razorpayFeeInr: payout.razorpayFeeInr,
+        gstInr: payout.gstInr,
         platformFeeInr: payout.platformFeeInr,
         feeInr: payout.feeInr,
         netInr: payout.netInr,
