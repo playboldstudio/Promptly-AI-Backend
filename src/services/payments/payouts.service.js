@@ -1,7 +1,7 @@
 import { COLS, findByPk, queryAll, inTxGet, inTxAdd, inTxSet, inTxQueryAll } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
 import { env } from '../../config/env.js';
-import { balanceFor, writeLedger } from '../ledger.js';
+import { writeLedger } from '../ledger.js';
 import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 
 const MIN_WITHDRAWAL_INR = env.MIN_WITHDRAWAL_INR;
@@ -31,30 +31,54 @@ function payoutFees(amountInr, platformFeePercent = 0) {
 }
 
 /**
+ * True withdrawable balance — ONLY money earned from paid prompt sales (the
+ * author's net share), minus what has already been withdrawn or is reserved by
+ * an in-flight payout. Wallet-ledger rows for buyer purchases, subscription
+ * payments, and corrections do NOT count toward what a creator can withdraw.
+ * Returns a non-negative amount.
+ */
+export async function withdrawableBalanceFor(userId) {
+  const [sales, payouts] = await Promise.all([
+    queryAll({
+      collection: COLS.promptPurchases,
+      filters: [{ field: 'authorId', value: userId }, { field: 'status', value: 'completed' }],
+    }),
+    queryAll({ collection: COLS.payouts, filters: [{ field: 'userId', value: userId }] }),
+  ]);
+
+  const earnedInr = sales.rows.reduce((sum, s) => sum + (Number(s.netInr) || 0), 0);
+  const reservedInr = payouts.rows
+    .filter((p) => ['pending', 'processing', 'paid'].includes(p.status))
+    .reduce((sum, p) => sum + (Number(p.amountInr) || 0), 0);
+
+  return Math.max(0, earnedInr - reservedInr);
+}
+
+/**
  * Withdrawal eligibility — the authoritative rules the app should surface.
  * A creator can withdraw when they hold an active Pro/Creator plan, have a
- * saved UPI destination, and the balance meets the minimum.
+ * saved UPI destination, and their sales earnings meet the minimum.
  */
 export async function withdrawalEligibility(userId) {
   const user = await findByPk(COLS.users, userId);
   const sub = await currentActiveSubscriptionWithPlan(userId);
   const planId = sub?.planId;
   const platformFeePercent = sub?.plan?.platformFeePercent ?? 0;
-  const balance = await balanceFor(userId);
+  const withdrawable = await withdrawableBalanceFor(userId);
 
   const hasUpi = Boolean(user?.upiId);
   const hasPaidPlan = planId === 'pro' || planId === 'creator';
-  const meetsMinimum = balance >= MIN_WITHDRAWAL_INR;
+  const meetsMinimum = withdrawable >= MIN_WITHDRAWAL_INR;
 
   const blockers = [];
   if (!hasPaidPlan) blockers.push('Upgrade to Pro or Creator to withdraw');
   if (!hasUpi) blockers.push('Add your UPI ID on your profile before withdrawing');
-  if (!meetsMinimum) blockers.push(`Balance below the ₹${MIN_WITHDRAWAL_INR} minimum`);
+  if (!meetsMinimum) blockers.push(`Earnings below the ₹${MIN_WITHDRAWAL_INR} withdrawal minimum`);
 
-  const fees = payoutFees(balance, platformFeePercent);
+  const fees = payoutFees(withdrawable, platformFeePercent);
 
   return {
-    withdrawableBalance: balance,
+    withdrawableBalance: withdrawable,
     minWithdrawalInr: MIN_WITHDRAWAL_INR,
     eligible: blockers.length === 0,
     blockers,
@@ -99,32 +123,47 @@ export async function requestPayout({ userId, amountInr }) {
   // Soft-pre-check for a fast 409; the authoritative check runs inside the
   // transaction below so two concurrent requests cannot both pass.
 
-  const balance = await balanceFor(userId);
-  if (amountInr > balance) {
-    return err(400, `Insufficient balance — you can withdraw up to ₹${balance}`);
+  // GATE 6 — the user may only withdraw money earned from paid prompt sales.
+  const sales = await queryAll({
+    collection: COLS.promptPurchases,
+    filters: [{ field: 'authorId', value: userId }, { field: 'status', value: 'completed' }],
+  });
+  const earnedInr = sales.rows.reduce((sum, s) => sum + (Number(s.netInr) || 0), 0);
+
+  const withdrawable = await withdrawableBalanceFor(userId);
+  if (amountInr > withdrawable) {
+    return err(400, `Insufficient sales earnings — you can withdraw up to ₹${withdrawable}`);
   }
 
   try {
     const { id: payoutId, balanceAfterInr } = await runTransaction(async (tx) => {
-      // Authoritative in-flight check inside the transaction (race-safe).
-      const inFlight = await inTxQueryAll(tx, {
+      // Authoritative in-flight check inside the transaction (race-safe), using
+      // the same query that recounts the reserved payout amounts below.
+      const payoutsInTx = await inTxQueryAll(tx, {
         collection: COLS.payouts,
-        filters: [
-          { field: 'userId', value: userId },
-          { field: 'status', op: 'in', value: ['pending', 'processing'] },
-        ],
-        limit: 1,
+        filters: [{ field: 'userId', value: userId }],
+        limit: 100,
       });
-      if (inFlight.length) {
+      const inFlight = payoutsInTx.find(
+        (p) => p.status === 'pending' || p.status === 'processing',
+      );
+      if (inFlight) {
         throw Object.assign(new Error('in-flight'), { inFlight: true });
       }
 
-      // Re-check the balance inside the transaction (authoritative).
-      const balDoc = await inTxGet(tx, COLS.userBalances, userId);
-      const bal = Number(balDoc?.balanceInr ?? 0);
-      if (amountInr > bal) {
+      // Re-count the reserved amount inside the transaction (authoritative):
+      // earned sales minus pending/processing/paid payouts.
+      const reservedInTx = payoutsInTx
+        .filter((p) => ['pending', 'processing', 'paid'].includes(p.status))
+        .reduce((sum, p) => sum + (Number(p.amountInr) || 0), 0);
+      const withdrawableInTx = Math.max(0, earnedInr - reservedInTx);
+      if (amountInr > withdrawableInTx) {
         throw Object.assign(new Error('insufficient'), { insufficient: true });
       }
+
+      // Wallet balance for the ledger row (bookkeeping of the reservation only).
+      const balDoc = await inTxGet(tx, COLS.userBalances, userId);
+      const bal = Number(balDoc?.balanceInr ?? 0);
 
       const ref = inTxAdd(tx, COLS.payouts, {
         userId,
@@ -158,7 +197,7 @@ export async function requestPayout({ userId, amountInr }) {
         },
       );
 
-      return { id: ref.id, balanceAfterInr: bal - amountInr };
+      return { id: ref.id, balanceAfterInr: withdrawableInTx - amountInr };
     });
 
     const payout = await findByPk(COLS.payouts, payoutId);
