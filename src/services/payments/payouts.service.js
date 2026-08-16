@@ -6,8 +6,67 @@ import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 
 const MIN_WITHDRAWAL_INR = env.MIN_WITHDRAWAL_INR;
 
+/** Flat Razorpay UPI-transfer fee charged on every withdrawal. */
+const RAZORPAY_FEE_PERCENT = 2;
+
 function err(status, message) {
   return { error: { status, message } };
+}
+
+/**
+ * Fee breakdown for a withdrawal. Fees are DEDUCTED from the requested amount:
+ * the admin pays `netInr` to the creator's UPI, the platform keeps the rest.
+ * `platformFeePercent` comes from the creator's plan (Pro=5%, Creator=0%).
+ */
+function payoutFees(amountInr, platformFeePercent = 0) {
+  const razorpayFeeInr = Math.round((amountInr * RAZORPAY_FEE_PERCENT) / 100);
+  const platformFeeInr = Math.round((amountInr * (platformFeePercent || 0)) / 100);
+  const feeInr = razorpayFeeInr + platformFeeInr;
+  return {
+    razorpayFeeInr,
+    platformFeeInr,
+    feeInr,
+    netInr: amountInr - feeInr,
+  };
+}
+
+/**
+ * Withdrawal eligibility — the authoritative rules the app should surface.
+ * A creator can withdraw when they hold an active Pro/Creator plan, have a
+ * saved UPI destination, and the balance meets the minimum.
+ */
+export async function withdrawalEligibility(userId) {
+  const user = await findByPk(COLS.users, userId);
+  const sub = await currentActiveSubscriptionWithPlan(userId);
+  const planId = sub?.planId;
+  const platformFeePercent = sub?.plan?.platformFeePercent ?? 0;
+  const balance = await balanceFor(userId);
+
+  const hasUpi = Boolean(user?.upiId);
+  const hasPaidPlan = planId === 'pro' || planId === 'creator';
+  const meetsMinimum = balance >= MIN_WITHDRAWAL_INR;
+
+  const blockers = [];
+  if (!hasPaidPlan) blockers.push('Upgrade to Pro or Creator to withdraw');
+  if (!hasUpi) blockers.push('Add your UPI ID on your profile before withdrawing');
+  if (!meetsMinimum) blockers.push(`Balance below the ₹${MIN_WITHDRAWAL_INR} minimum`);
+
+  const fees = payoutFees(balance, platformFeePercent);
+
+  return {
+    withdrawableBalance: balance,
+    minWithdrawalInr: MIN_WITHDRAWAL_INR,
+    eligible: blockers.length === 0,
+    blockers,
+    hasUpi,
+    hasPaidPlan,
+    meetsMinimum,
+    currency: 'INR',
+    razorpayFeePercent: RAZORPAY_FEE_PERCENT,
+    platformFeePercent,
+    estimatedFeeInr: fees.feeInr,
+    estimatedNetInr: fees.netInr,
+  };
 }
 
 export async function requestPayout({ userId, amountInr }) {
@@ -28,6 +87,9 @@ export async function requestPayout({ userId, amountInr }) {
     return err(403, 'Subscriber only — upgrade to Pro or Creator before withdrawing');
   }
 
+  // Fee breakdown: 2% Razorpay + the plan's platform fee, deducted from payout.
+  const fees = payoutFees(amountInr, sub?.plan?.platformFeePercent ?? 0);
+
   // GATE 2 — the creator needs a saved UPI payout destination.
   if (!user?.upiId) {
     return err(400, 'Add your UPI ID on your profile before withdrawing');
@@ -43,7 +105,7 @@ export async function requestPayout({ userId, amountInr }) {
   }
 
   try {
-    const payoutId = await runTransaction(async (tx) => {
+    const { id: payoutId, balanceAfterInr } = await runTransaction(async (tx) => {
       // Authoritative in-flight check inside the transaction (race-safe).
       const inFlight = await inTxQueryAll(tx, {
         collection: COLS.payouts,
@@ -71,13 +133,18 @@ export async function requestPayout({ userId, amountInr }) {
         upiId: user.upiId ?? null,
         razorpayPayoutId: null,
         bankAccountId: null,
+        razorpayFeeInr: fees.razorpayFeeInr,
+        platformFeeInr: fees.platformFeeInr,
+        feeInr: fees.feeInr,
+        netInr: fees.netInr,
         processedAt: null,
         failureReason: null,
         createdAt: new Date(),
         updatedAt: new Date(),
       });
 
-      // Reserve the amount: a debit now, "paid" later is pure bookkeeping.
+      // Reserve the full requested amount: a debit now, "paid" later is pure
+      // bookkeeping. The admin transfers only `netInr` to the creator's UPI.
       await writeLedger(
         tx,
         {
@@ -86,12 +153,12 @@ export async function requestPayout({ userId, amountInr }) {
           direction: 'debit',
           amountInr,
           refId: ref.id,
-          note: 'Withdrawal request (manual settle via UPI, pending)',
+          note: `Withdrawal — ₹${amountInr} minus ₹${fees.feeInr} fees (2% Razorpay${fees.platformFeeInr ? ` + ${sub?.plan?.platformFeePercent ?? 0}% platform` : ''}), ${fees.netInr} to UPI`,
           balanceInr: bal,
         },
       );
 
-      return ref.id;
+      return { id: ref.id, balanceAfterInr: bal - amountInr };
     });
 
     const payout = await findByPk(COLS.payouts, payoutId);
@@ -101,8 +168,15 @@ export async function requestPayout({ userId, amountInr }) {
         amountInr: payout.amountInr,
         status: payout.status,
         upiId: payout.upiId,
+        razorpayFeeInr: payout.razorpayFeeInr,
+        platformFeeInr: payout.platformFeeInr,
+        feeInr: payout.feeInr,
+        netInr: payout.netInr,
         createdAt: payout.createdAt,
       },
+      balanceInr: balanceAfterInr,
+      minWithdrawalInr: MIN_WITHDRAWAL_INR,
+      currency: 'INR',
     };
   } catch (error) {
     if (error.inFlight) {
@@ -113,6 +187,20 @@ export async function requestPayout({ userId, amountInr }) {
     }
     return { error: { status: 409, message: 'Could not create the payout — try again' } };
   }
+}
+
+/**
+ * A user's own payout history (id, amount, status, dates, failure reason).
+ */
+export async function listUserPayouts(userId, { limit = 50, offset = 0 } = {}) {
+  const { rows } = await queryAll({
+    collection: COLS.payouts,
+    filters: [{ field: 'userId', value: userId }],
+    orderBy: { field: 'createdAt', direction: 'desc' },
+    limit: Math.min(limit, 100),
+    offset: Math.max(offset, 0),
+  });
+  return { payouts: rows, total: rows.length };
 }
 
 /**

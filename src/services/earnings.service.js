@@ -1,5 +1,6 @@
 import { COLS, queryAll, getMany } from '../db/firestoreRepo.js';
 import { balanceFor } from './ledger.js';
+import { withdrawalEligibility } from './payments/payouts.service.js';
 
 /**
  * Creator earnings — derived from prompt_purchases + payouts + ledger.
@@ -36,13 +37,14 @@ export async function getEarningsByPrompt(authorId) {
  * Earnings summary: lifetime net, withdrawn, pending payouts, available balance.
  */
 export async function getEarningsSummary(authorId) {
-  const [sales, payoutRows, balance] = await Promise.all([
+  const [sales, payoutRows, balance, elig] = await Promise.all([
     queryAll({
       collection: COLS.promptPurchases,
       filters: [{ field: 'authorId', value: authorId }, { field: 'status', value: 'completed' }],
     }),
     queryAll({ collection: COLS.payouts, filters: [{ field: 'userId', value: authorId }] }),
     balanceFor(authorId),
+    withdrawalEligibility(authorId),
   ]);
 
   const totalEarnings = sales.rows.reduce((sum, s) => sum + (Number(s.netInr) || 0), 0);
@@ -60,6 +62,11 @@ export async function getEarningsSummary(authorId) {
     salesCount,
     withdrawnInr,
     pendingPayouts,
-    balanceInr: balance, // what the creator can withdraw (subject to min ₹60 + saved UPI)
+    balanceInr: balance, // ledger balance, already net of pending payout reservations
+    withdrawableBalance: elig.withdrawableBalance, // what can actually be withdrawn now
+    minWithdrawalInr: elig.minWithdrawalInr,
+    withdrawalEligible: elig.eligible,
+    withdrawalBlockers: elig.blockers,
+    currency: elig.currency,
   };
 }

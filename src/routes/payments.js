@@ -6,6 +6,8 @@ import { createCheckoutOrder, verifyAndUnlock } from '../services/payments/check
 import {
   requestPayout,
   listPayouts,
+  listUserPayouts,
+  withdrawalEligibility,
   markPayoutPaid,
   markPayoutFailed,
 } from '../services/payments/payouts.service.js';
@@ -134,8 +136,36 @@ router.post('/subscriptions', moneyLimiter, requireRazorpayKeys, async (req, res
 const payoutSchema = z.object({ amountInr: z.number().int().positive() });
 
 /**
+ * GET /payments/payouts/eligibility — the signed-in creator's withdrawal rules:
+ * withdrawableBalance, minWithdrawalInr, eligible + blockers the UI can render.
+ */
+router.get('/payouts/eligibility', async (req, res, next) => {
+  try {
+    const result = await withdrawalEligibility(req.userId);
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * GET /payments/payouts — the signed-in creator's payout history.
+ * Query params: limit, offset.
+ */
+router.get('/payouts', async (req, res, next) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 50, 100);
+    const offset = Math.max(Number(req.query.offset) || 0, 0);
+    const result = await listUserPayouts(req.userId, { limit, offset });
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
  * POST /payments/payouts — request a withdrawal (manual settle, min ₹60).
- * Body: { amountInr } → { payout: { id, amountInr, status } }
+ * Body: { amountInr } → { payout: { id, amountInr, status }, balanceInr, ... }
  */
 router.post('/payouts', moneyLimiter, async (req, res, next) => {
   try {
