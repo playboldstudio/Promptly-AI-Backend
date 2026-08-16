@@ -3,31 +3,32 @@ import { z } from 'zod';
 
 /**
  * Environment configuration, validated once at startup with zod.
- * Fails fast with a clear message so misconfigured deploys don't half-boot.
+ * Fails fast so misconfigured deploys don't half-boot.
  */
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.coerce.number().int().positive().default(3000),
-  DATABASE_URL: z
-    .string()
-    .min(1, 'DATABASE_URL is required (e.g. postgresql://user:pass@host:5432/promptly)'),
+  PORT: z.coerce.number().int().positive().default(8080),
 
-  // Razorpay — all optional so the app boots without them (payments throw 501).
+  FIREBASE_PROJECT_ID: z.string().min(1, 'FIREBASE_PROJECT_ID is required'),
+  FIRESTORE_DATABASE: z.string().optional().default(''),
+  FIREBASE_CLIENT_EMAIL: z.string().optional().default(''),
+  FIREBASE_PRIVATE_KEY: z.string().optional().default(''),
+  GOOGLE_APPLICATION_CREDENTIALS: z.string().optional().default(''),
+  STORAGE_BUCKET: z.string().optional().default(''),
+
   RAZORPAY_KEY_ID: z.string().optional().default(''),
   RAZORPAY_KEY_SECRET: z.string().optional().default(''),
   RAZORPAY_WEBHOOK_SECRET: z.string().optional().default(''),
 
-  // Razorpay Subscription Plan IDs — map our plan id ("pro"/"creator") → Razorpay's
-  // plan id, so the app creates subscriptions with the correct billing plan.
   RAZORPAY_PLAN_PRO_ID: z.string().optional().default(''),
   RAZORPAY_PLAN_CREATOR_ID: z.string().optional().default(''),
 
-  // Deploy / URLs — see src/config/urls.js for the local vs live switch.
-  // PUBLIC_BASE_URL is the live API URL (defaults to the Render service name).
   PUBLIC_BASE_URL: z.string().optional().default(''),
-  // Extra browser origins CORS should accept (comma-separated), e.g. the frontend
-  // dev server http://localhost:8081. Localhost:3000 + the live URL are always allowed.
   CORS_ORIGINS: z.string().optional().default(''),
+
+  ADMIN_EMAILS: z.string().optional().default(''),
+
+  MIN_WITHDRAWAL_INR: z.coerce.number().int().positive().default(60),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -42,18 +43,24 @@ if (!parsed.success) {
 
 export const env = parsed.data;
 
-// True when both Razorpay keys are configured → payment flows can run.
-// Routes/services use this to return 501 ("not configured") instead of crashing.
+/** Emails allowed to use the admin back-office (from ADMIN_EMAILS env). */
+export const ADMIN_EMAILS = (env.ADMIN_EMAILS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+/** True when the email belongs to a platform admin (admin back-office access). */
+export function isAdminEmail(email) {
+  return Boolean(email && ADMIN_EMAILS.includes(email));
+}
+
 export const hasRazorpayKeys = Boolean(env.RAZORPAY_KEY_ID && env.RAZORPAY_KEY_SECRET);
 
-// Map our subscription_plans.id ("pro" / "creator") → the Razorpay plan id the user
-// created in the dashboard. Paid plans need a Razorpay plan id; "free" never does.
 export const RAZORPAY_PLAN_BY_ID = {
   pro: env.RAZORPAY_PLAN_PRO_ID,
   creator: env.RAZORPAY_PLAN_CREATOR_ID,
 };
 
-/** Razorpay plan id for a given subscription plan id, or '' if none is configured. */
 export function razorpayPlanIdFor(planId) {
   return RAZORPAY_PLAN_BY_ID[planId] ?? '';
 }

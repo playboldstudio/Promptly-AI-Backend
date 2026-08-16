@@ -1,19 +1,21 @@
 # Promptly AI — Backend
 
-Backend for **Promptly AI**, an AI-prompt marketplace. **Node.js + Express + Sequelize +
-PostgreSQL** (plain JavaScript, ESM). Supports free/pro/creator subscriptions, paid prompt
-unlocks, and creator payouts — all money routed through **Razorpay** in the live app.
+Backend for **Promptly AI**, an AI-prompt marketplace. **Node.js + Express + Firebase
+Firestore + Firebase Auth** (plain JavaScript, ESM). Supports free/pro/creator
+subscriptions, paid prompt unlocks, and creator payouts — all money routed through
+**Razorpay**. Deploys to **Google Cloud Run**.
 
 > The mobile/UI app is **UI-only today** (in-memory mocks). This backend is designed so
-> the UI can swap its mock repository for this live API without visual changes. The data
-> model lives in `src/db/models/*.js`.
+> the UI can swap its mock repository for this live API without visual changes.
 
 ## Stack
 
 - **Node.js ≥ 20** + **Express 4** (ESM, no build step)
-- **Sequelize 6** ORM + **PostgreSQL** (hosted: Neon / Supabase / Railway / RDS), `pg` driver
-- **zod** for env + input validation
-- `helmet`, `cors`, `morgan` middleware
+- **Firebase Firestore** (Native) as the datastore, via `firebase-admin`
+- **Firebase Authentication** — the backend verifies client ID tokens (Admin SDK)
+- **Razorpay** for payments (orders, subscriptions, webhooks)
+- **Google Cloud Run** + **Docker** for deployment
+- **zod** for env + input validation; `helmet`, `cors`, `morgan` middleware
 
 ## Getting started
 
@@ -25,8 +27,11 @@ npm install
 copy .env.example .env     # Windows
 # cp .env.example .env     # macOS/Linux
 
-# 3. Paste your PostgreSQL connection string into .env as DATABASE_URL
-#    (e.g. from a free Neon or Supabase project). `sslmode=require` is pre-set.
+# 3. Set FIREBASE_PROJECT_ID (required) — the app connects to Firestore + Auth.
+#    In local dev, either use Application Default Credentials
+#    (gcloud auth application-default login) or set FIREBASE_CLIENT_EMAIL /
+#    FIREBASE_PRIVATE_KEY from a service-account key. The emulator is also
+#    supported via FIRESTORE_EMULATOR_HOST.
 
 # 3b. (Payments) Put your Razorpay keys in .env, plus the Subscription Plan IDs:
 #    create two plans in dashboard.razorpay.com → Settings → Plans ("Pro" ₹49/mo,
@@ -34,14 +39,11 @@ copy .env.example .env     # Windows
 #    Set RAZORPAY_WEBHOOK_SECRET to the secret from Settings → Webhooks and point the
 #    webhook URL at your server's POST /webhooks/razorpay.
 
-# 4. Create/update the tables from the models
-npm run db:sync
-
-# 5. Seed starter data (plans, demo creator, sample prompts, a ledger row)
+# 4. Seed starter data into Firestore (plans, demo creator, sample prompts)
 npm run db:seed
 
-# 6. Start the dev server (auto-restarts on file changes)
-npm run dev                # http://localhost:3000
+# 5. Start the dev server (auto-restarts on file changes)
+npm run dev                # http://localhost:8080
 ```
 
 ## Scripts
@@ -50,57 +52,67 @@ npm run dev                # http://localhost:3000
 |---|---|
 | `npm run dev` | Run with hot reload (`node --watch`) |
 | `npm start` | Run without watch |
-| `npm run db:sync` | Create/update tables from models (`sequelize.sync({ alter })`) |
-| `npm run db:seed` | Seed starter data (idempotent) |
-| `npm run db:reset` | **Destructive** — drop + recreate tables, then seed (dev only) |
+| `npm test` | Unit tests (Node's built-in `node:test` — no framework dep) |
+| `npm run db:sync` | Verify Firestore connectivity (schema is implicit — no tables) |
+| `npm run db:seed` | Seed starter data into Firestore (idempotent) |
+| `npm run db:reset` | **Destructive** — clear all Firestore collections, then seed (dev only; refuses in production) |
 
-> ⚠️ `db:sync` is a dev convenience. Before production, adopt real migrations
-> (`sequelize-cli`) so schema changes are versioned and safe on a live database.
+> Firestore is schemaless — collections are created on first write. Composite
+> indexes are defined in `firestore.indexes.json` and client access is locked
+> down by `firestore.rules` (deny-all). Apply both via
+> `npx firebase deploy --only firestore`.
 
-## Deploy on Render
+## Deploy on Google Cloud Run
 
-This repo ships a `render.yaml` blueprint — one-click deploy:
+This backend now runs on **Google Cloud Run** with **Firebase Firestore** as the
+database and **Firebase Auth** for identity. The old Render/PostgreSQL setup is
+gone (no `DATABASE_URL`; the app no longer depends on Postgres or Sequelize).
 
-1. **Push this repo to GitHub** (done — `origin` is set).
-2. Render dashboard → **New → Blueprint** → connect the repo → **Apply**.
-   (`render blueprint launch` works too if you use the Render CLI.)
-3. In the new service → **Environment**, set the secrets (marked `sync: false` in
-   the blueprint so they never live in the repo):
-   - `DATABASE_URL` — the same Neon connection string as local
-   - `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`
-   - `RAZORPAY_WEBHOOK_SECRET` — **use a real secret**, not the dev placeholder
-   - `RAZORPAY_PLAN_PRO_ID`, `RAZORPAY_PLAN_CREATOR_ID`
-   - `PUBLIC_BASE_URL` is pre-set to `https://promptly-ai-backend.onrender.com`
-   - Do **not** set `PORT` — Render injects its own.
-4. Deploy. The health check (`/health`) runs automatically.
+Full runbook (Firestore setup, secrets, indexes, deploy commands, webhook URL,
+manual steps): see **`CLOUD_RUN_DEPLOYMENT.md`**.
 
-**One-time DB setup:** your Neon DB is already synced + seeded from local dev, so
-nothing to do. If you ever point this at a fresh database, run once from the
-Render **Shell** tab (or locally against the same DB):
+Quick start:
 
 ```bash
-npm run db:sync
+gcloud config set project $PROJECT_ID
+gcloud services enable firestore.googleapis.com firebaseauth.googleapis.com \
+  run.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com
+
+# One-time: create Firestore composite indexes + apply security rules
+npx firebase deploy --only firestore
+
+# Seed the starter plans + demo prompts into Firestore (once)
 npm run db:seed
+
+# Deploy
+gcloud run deploy promptly-ai-backend \
+  --source . \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --set-env-vars NODE_ENV=production \
+  --set-secrets RAZORPAY_KEY_ID=razorpay-key-id:latest,RAZORPAY_KEY_SECRET=razorpay-key-secret:latest,RAZORPAY_WEBHOOK_SECRET=razorpay-webhook-secret:latest,FIREBASE_CLIENT_EMAIL=firebase-client-email:latest,FIREBASE_PRIVATE_KEY=firebase-private-key:latest,RAZORPAY_PLAN_PRO_ID=razorpay-plan-pro:latest,RAZORPAY_PLAN_CREATOR_ID=razorpay-plan-creator:latest
 ```
 
-**After deploy:** point Razorpay's webhook at `https://<service>.onrender.com/webhooks/razorpay`.
-In **test mode** you can use a tunnel (ngrok / cloudflared) to forward to your
-local server, which is handy for debugging webhooks against your dev environment.
+**After deploy:** point Razorpay's webhook at
+`https://<cloud-run-url>/webhooks/razorpay`. In **test mode** you can use a tunnel
+(ngrok / cloudflared) to forward to your local server for debugging webhooks.
 
-**Notes for Render**
-- Free tier spins down after ~15 min idle; the first hit after idle is a cold
-  start. Webhooks stay safe because the handler is idempotent (Razorpay retries,
-  and a duplicate delivery is a no-op).
+**Notes for Cloud Run**
+- The server binds `0.0.0.0` on `PORT` (default 8080) — Cloud Run injects `PORT`.
+- Webhooks stay safe because the handler is idempotent (Razorpay retries, and a
+  duplicate delivery is a no-op via the Firestore `webhook_events` dedupe).
 - Swap `rzp_test_*` → `rzp_live_*` and set a real webhook secret before real money.
 
 ## API surface (current)
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/health` | – | App status + DB ping (`SELECT 1`) |
-| POST | `/auth/dev/login` | – | **Dev only.** `{ email }` → upserts user, returns `{ token, user }`. Swap point for Firebase/Supabase. |
+| GET | `/health` | – | App status + Firestore ping |
+| POST | `/auth/login` | – | **Firebase Auth.** `{ idToken }` → verifies the ID token, upserts the user, returns `{ user, token }`. |
+| POST | `/auth/dev/login` | – | **Dev only (disabled in production).** `{ email }` → dev user + bare token. |
 | GET | `/prompts` | optional | List published prompts. `?category=`, `?paid=free|paid`, `?sort=trending|new|recent`, `?q=` |
 | GET | `/prompts/:id` | optional | Prompt detail. Paid prompt text unlocked only for owner/unlockers. |
+| POST | `/prompts` | ✅ | **Creator publish.** Body `{ title, description, promptText, imageUrl?, category, tags?, isPaid, priceInr? }`. `authorId` = caller. Gated on the plan's daily post limit (Free = 3/day; Pro/Creator unlimited) and paid prompts require the **Creator** plan (`canPostPaid`). |
 | POST | `/prompts/:id/save` | ✅ | Save a prompt (idempotent). Returns `{ saved, saveCount }`. |
 | POST | `/prompts/:id/unsave` | ✅ | Remove a save (idempotent). Returns `{ saved, saveCount }`. |
 | GET | `/me/profile` | ✅ | Signed-in user profile + current subscription + KYC state |
@@ -112,60 +124,49 @@ local server, which is handy for debugging webhooks against your dev environment
 | POST | `/payments/checkout/order` | ✅ | Create a Razorpay order for a paid prompt. Body `{ promptId }` → `{ orderId, amountInr, currency, feePercent, feeInr, netInr }`. |
 | POST | `/payments/checkout/verify` | ✅ | Verify the payment + unlock. Body = Razorpay Checkout success payload `{ promptId, orderId, paymentId, signature }`. Writes the purchase + ledger. |
 | POST | `/payments/subscriptions` | ✅ | Create a Razorpay subscription. Body `{ planId: "pro" | "creator" }` → `{ subscription: { razorpaySubId, shortUrl, … } }`. The app opens `shortUrl` to collect the first payment. |
-| POST | `/payments/payouts` | ✅ | Request a withdrawal (**manual settle**, min ₹60). Body `{ amountInr }`. Requires verified KYC + bank account; reserves the balance as `pending`. |
-| GET | `/payments/admin/payouts` | ✅ | **Admin (solo dev).** List payout requests with full bank details. `?status=pending`. ⚠️ not role-gated — dev only. |
+| POST | `/payments/payouts` | ✅ | Request a withdrawal (**manual settle**, min ₹60). Body `{ amountInr }`. Requires saved UPI; reserves the balance as `pending`. |
+| GET | `/payments/admin/payouts` | ✅ + admin | **Admin.** List payout requests with UPI details. `?status=pending`. Requires `ADMIN_EMAILS` (403 otherwise). |
 | POST | `/payments/admin/payouts/:id/mark-paid` | ✅ | **Admin.** Mark a pending payout `paid` after you've transferred the money. |
 | POST | `/payments/admin/payouts/:id/mark-failed` | ✅ | **Admin.** Mark a payout `failed`; the reserved balance is returned to the creator. |
-| POST | `/webhooks/razorpay` | signature | Verify `X-Razorpay-Signature` (HMAC), log idempotently to `webhook_events` (unique `dedupe_key`), dispatch `subscription.charged` / `.cancelled` / `.expired`. |
+| POST | `/webhooks/razorpay` | signature | Verify `X-Razorpay-Signature` (HMAC), log idempotently to `webhook_events` (dedupe key = doc id), dispatch `subscription.charged` / `.cancelled` / `.expired`. |
 
-Auth uses a **Bearer token** where the token *is* the user id in dev
-(`Authorization: Bearer <user-id>`), issued by `/auth/dev/login`. Replace
-`src/middleware/auth.js` + `src/routes/auth.js` with real JWT verification
-(Firebase/Supabase) before launch.
+Auth uses **Firebase Auth**: the client sends a verified ID token as
+`Authorization: Bearer <idToken>`. The backend verifies it with the Admin SDK and
+maps the Firebase UID → the `users/{uid}` Firestore doc (lazily created from the
+token's claims). The old bare-user-id token is accepted only in development.
 
 Example:
 
 ```bash
-curl -s http://localhost:3000/health
-curl -s -X POST http://localhost:3000/auth/dev/login \
+curl -s http://localhost:8080/health
+curl -s -X POST http://localhost:8080/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"email":"demo@promptly.app"}'
-# → { "token": "<uuid>", "user": { ... } }
+  -d '{"idToken":"<firebase-id-token>"}'
+# → { "user": { ... }, "token": "<idToken>" }
 
-curl -s http://localhost:3000/prompts?paid=free
-curl -s http://localhost:3000/prompts?sort=trending
-curl -s http://localhost:3000/me/transactions \
-  -H 'Authorization: Bearer <token>'
+curl -s http://localhost:8080/prompts?paid=free
+curl -s http://localhost:8080/prompts?sort=trending
+curl -s http://localhost:8080/me/transactions \
+  -H 'Authorization: Bearer <idToken>'
 ```
 
-## Local vs live base URL
+## Live base URL
 
-The backend has **two** base URLs — local for testing, live for production — and
-both are defined in **one place**, `src/config/urls.js`:
+The backend uses exactly **one** API base URL — the Cloud Run deployment. It's
+defined in **one place**, `src/config/urls.js`:
 
-| URL | Value | When |
-|---|---|---|
-| `BASE_URLS.local` | `http://localhost:3000` | `NODE_ENV` = development |
-| `BASE_URLS.live` | `PUBLIC_BASE_URL` env (default `https://promptly-ai-backend.onrender.com`) | `NODE_ENV` = production |
+| Constant | Value |
+|---|---|
+| `API_BASE_URL` | `PUBLIC_BASE_URL` env (default `http://localhost:8080`) |
 
-`getApiBaseUrl()` picks the right one automatically. CORS always allows both
-(local + live), plus anything in `CORS_ORIGINS` — so a browser frontend on
-`:8081` or `:5173` can call the local API during dev.
+CORS always allows the live URL, plus anything in `CORS_ORIGINS` (e.g. a web
+frontend dev server). Mobile apps don't send an Origin header and don't need CORS.
 
-**How the frontend switches:** the real toggle is an `API_BASE_URL` constant in
-your app (there's no frontend in this repo yet). The universal pattern is:
-
-```js
-const API_BASE_URL = __DEV__ ? 'http://localhost:3000' : 'https://promptly-ai-backend.onrender.com';
-```
-
-Per stack: Expo → `EXPO_PUBLIC_API_URL` in `.env.development`/`.env.production`;
-Vite/web → `VITE_API_URL`; Flutter → `--dart-define=API_BASE_URL=...`. Mobile
-apps don't need CORS at all.
-
-⚠️ **Android emulator** can't reach your machine via `localhost` — use
-`http://10.0.2.2:3000`. **Physical phone** → use your computer's LAN IP on the
-same Wi-Fi.
+The Android app reads its base URL from `BuildConfig.API_BASE_URL`
+(`app/build.gradle.kts`) — debug points at the emulator's local backend, release
+at the Cloud Run URL; override either with `-PAPI_BASE_URL=https://.../`.
+Payments run against Razorpay **test keys** (`rzp_test_*`) for the initial stage;
+only the URL is live.
 
 ## Money model (Razorpay, live app)
 
@@ -194,25 +195,20 @@ RazorpayX involved. `mark-failed` reverses the reservation.
 - Payouts reserve the balance *at request time* — `pending` money can't be double-withdrawn.
 - Webhooks are idempotent: a unique `dedupe_key` (hash of event + payload) makes replays
   no-ops, so a doubled delivery can't double-charge a subscription.
-- ⚠️ `bank_accounts.account_number_full` stores the full account number in **plaintext** for
-  the manual transfer. **Encrypt it before real money** (see "Before launch").
 
 ## Data model
 
-12 tables (see `src/db/models/*.js`): `users`, `subscription_plans`, `user_subscriptions`,
-`prompts`, `user_posts`, `prompt_purchases`, `transactions`, `payouts`, `bank_accounts`,
-`kyc_verifications`, `saved_prompts`, plus `webhook_events` for idempotent Razorpay webhook
-replay.
+Firestore collections (schema-less; see `src/db/firestoreRepo.js` for the
+collection names): `users`, `subscription_plans`, `user_subscriptions`, `prompts`,
+`prompt_purchases`, `transactions`, `payouts`, `saved_prompts`,
+`user_balances`, plus `webhook_events` for idempotent Razorpay webhook replay.
 
-Key invariants baked into the models:
-- One unlock per buyer per prompt → unique index `(buyer_id, prompt_id)`
-- Saved prompts → composite primary key `(user_id, prompt_id)`
-- KYC is 1:1 with users → unique `user_id`
-- Hot queries indexed: `prompts(category, is_paid)`, `prompts(created_at)`,
-  `user_posts(user_id, posted_on)`, `transactions(user_id, created_at)`,
-  `prompt_purchases(author_id)`
-- Daily post limit derives from `COUNT(user_posts WHERE posted_on = today)` — no counter
-  column to drift.
+Key invariants enforced by the service layer:
+- One unlock per buyer per prompt → deterministic doc id `(buyer_id, prompt_id)`
+- Saved prompts → composite id `(user_id, prompt_id)`
+- Hot queries indexed: `prompts(status, createdAt)`, `prompts(authorId, createdAt)`,
+  `transactions(userId, createdAt)`, `prompt_purchases(authorId, status)`
+- Daily post limit derives from `COUNT(prompts WHERE authorId AND createdAt = today)`
 
 ### Metrics & how they're computed
 
@@ -230,34 +226,33 @@ Key invariants baked into the models:
 
 ```
 src/
-  server.js              # entrypoint: listens on PORT, graceful shutdown
+  server.js              # entrypoint: binds 0.0.0.0 on PORT, graceful shutdown
   app.js                 # Express app assembly (raw body for webhooks, JSON elsewhere)
-  config/env.js          # zod-validated environment
+  config/env.js          # zod-validated environment (Firebase, Razorpay, URLs)
+  config/urls.js         # single live API base URL (Cloud Run via PUBLIC_BASE_URL)
   db/
-    config.js            # Sequelize instance + pingDb()
-    models.js            # imports + associates all models (relationship map)
-    models/              # one file per table
-    sync.js              # npm run db:sync
-    seed.js              # idempotent seed
-    reset.js             # npm run db:reset (destructive)
-  middleware/            # auth (dev), error handler, 404
+    firestore.js         # Firebase Admin init (Firestore + Auth)
+    firestoreRepo.js     # Firestore data-access helpers (queries, tx helpers, serializers)
+    config.js            # db + runTransaction() + pingDb()
+    sync.js              # npm run db:sync (connectivity check — schema is implicit)
+    seed.js              # idempotent Firestore seed (plans, demo prompts)
+    reset.js             # npm run db:reset (clears collections — destructive)
+  middleware/            # Firebase Auth, error handler, 404
   routes/                # HTTP layer — thin, delegates to services
-  services/              # business logic + all Sequelize queries
-    ledger.js            # shared running-balance + writeLedger() helpers
+  services/              # business logic + all Firestore queries
+    ledger.js            # running balance (user_balances) + writeLedger() helpers
     prompt-metrics.js    # derived isTrending / isNew from counts + age
     earnings.service.js  # creator earnings aggregation from prompt_purchases
-    webhooks.service.js  # verify → idempotent log → dispatch by event
+    webhooks.service.js  # verify → idempotent log (dedupe doc id) → dispatch by event
     payments/            # Razorpay: checkout, subscriptions, manual-settle payouts
 ```
 
 ## Roadmap / not yet built
 
-- Real Firebase/Supabase auth (`src/middleware/auth.js` + `src/routes/auth.js` are the swap points)
-- **Admin role gating** — the `/payments/admin/*` endpoints currently trust any signed-in
-  user. Add a real admin check before launch.
+- **Admin role gating** — `/payments/admin/*` is gated by `ADMIN_EMAILS` (403 for others).
 - Refund flow (`prompt_purchases.status = 'refunded'` → reverse ledger rows)
-- **Encrypt** `bank_accounts.account_number_full` (and the KYC `pan`) — plaintext today, test-mode only
 - RazorpayX Payouts — only if/when you register a **business** account; the manual-settle
   flow is the solo-individual path
-- Real migrations (`sequelize-cli`) to replace `db:sync` for production
-- Rate limiting, request logging to a service, tests
+- Distributed rate limiting (the built-in limiter is per-instance in-memory)
+- Client-side Firestore reads — **decided:** all access stays behind the API; `firestore.rules`
+  denies all direct client access (the backend uses the Admin SDK, which bypasses rules)

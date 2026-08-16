@@ -1,38 +1,46 @@
-import { Transaction } from '../db/models.js';
+import { FieldValue } from 'firebase-admin/firestore';
+import { COLS, inTxAdd, inTxGet, inTxSet, findByPk } from '../db/firestoreRepo.js';
 
 /**
- * Shared ledger helpers — every credit/debit for a user is one row in
- * `transactions`, with `balance_after_inr` snapshotted for an audit trail.
- * All amounts are integer rupees.
+ * Ledger helpers — every credit/debit is one row in `transactions` with the
+ * running balance (user_balances) snapshotted for an audit trail.
+ * All amounts are integer rupees. MUST run inside a Firestore transaction.
  */
 
-/** Latest running balance for a user, used to keep balance_after_inr consistent. */
-export async function runningBalanceFor(userId, transaction) {
-  const last = await Transaction.findOne({
-    where: { userId },
-    order: [['createdAt', 'DESC']],
-    transaction,
+export async function writeLedger(tx, { userId, type, direction, amountInr, refId, note, balanceInr }) {
+  // Firestore forbids reads AFTER writes inside a transaction, so callers that
+  // write before the ledger must pre-read the balance and pass it here.
+  const prevBalance =
+    balanceInr ?? Number((await inTxGet(tx, COLS.userBalances, userId))?.balanceInr ?? 0);
+  const balanceAfterInr =
+    direction === 'credit' ? prevBalance + amountInr : prevBalance - amountInr;
+
+  const ref = inTxAdd(tx, COLS.transactions, {
+    userId,
+    type,
+    direction,
+    amountInr,
+    balanceAfterInr,
+    refId: refId ?? null,
+    note,
+    createdAt: new Date(),
+    updatedAt: new Date(),
   });
-  return last ? last.balanceAfterInr : 0;
+
+  // Keep the aggregate balance in sync (absolute write inside the tx is atomic).
+  inTxSet(tx, COLS.userBalances, userId, {
+    balanceInr: balanceAfterInr,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  return ref.id;
 }
 
 /**
- * Write one ledger row inside the caller's transaction and return it.
- *
- * @param {object} opts
- * @param {string} opts.userId
- * @param {string} opts.type     TransactionType enum value
- * @param {'credit'|'debit'} opts.direction
- * @param {number} opts.amountInr positive integer rupees
- * @param {string} [opts.refId]   id of the source row (purchase/subscription/payout)
- * @param {string} opts.note      human-readable line shown in the app
- * @param {import('sequelize').Transaction} transaction
+ * Read a user's current balance (for display / payout pre-checks — authoritative
+ * deduction happens inside writeLedger's transaction).
  */
-export async function writeLedger({ userId, type, direction, amountInr, refId, note }, transaction) {
-  const balance = await runningBalanceFor(userId, transaction);
-  const balanceAfterInr = direction === 'credit' ? balance + amountInr : balance - amountInr;
-  return Transaction.create(
-    { userId, type, direction, amountInr, balanceAfterInr, refId, note },
-    { transaction },
-  );
+export async function balanceFor(userId) {
+  const doc = await findByPk(COLS.userBalances, userId);
+  return Number(doc?.balanceInr ?? 0);
 }

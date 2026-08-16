@@ -17,10 +17,12 @@ import { allowedOrigins } from './config/urls.js';
 export function createApp() {
   const app = express();
 
+  // Cloud Run / Load Balancer sets X-Forwarded-For — trust it so req.ip (used
+  // by rate limiting) reflects the real client, not the proxy.
+  app.set('trust proxy', true);
+
   app.use(helmet());
-  // CORS — open in development (any local origin can test), locked to the
-  // known origins (local + live + CORS_ORIGINS) in production. Mobile apps
-  // and curl send no Origin header and are always allowed.
+  // CORS — open in development, locked to known origins in production.
   const origins = allowedOrigins();
   const allowAll = env.NODE_ENV !== 'production';
   app.use(
@@ -37,7 +39,6 @@ export function createApp() {
   // Mount it BEFORE the JSON parser.
   app.use('/webhooks/razorpay', express.raw({ type: 'application/json' }), webhooksRouter);
 
-  // Everything else parses JSON normally.
   app.use(express.json({ limit: '1mb' }));
 
   app.use(healthRouter);

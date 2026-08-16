@@ -1,11 +1,10 @@
-import { Op } from 'sequelize';
-import { Prompt, PromptPurchase, SavedPrompt } from '../db/models.js';
-import { sequelize } from '../db/config.js';
+import crypto from 'node:crypto';
+import { COLS, findByPk, queryAll, remove, upsert, create, getMany, increment } from '../db/firestoreRepo.js';
 import { derivePromptFlags } from './prompt-metrics.js';
+import { currentActiveSubscriptionWithPlan } from './payments/subscription-utils.js';
 
-// Fields safe to expose publicly. promptText is intentionally excluded — it is the
-// paid asset and is only revealed to owners/unlockers (see getPromptById).
-// isTrending / isNew are NOT in the DB — they are derived (see derivePromptFlags).
+// promptText is the paid asset and is only revealed to owners/unlockers
+// (see getPromptById). isTrending / isNew are derived, never stored.
 const PUBLIC_PROMPT_ATTRS = [
   'id',
   'title',
@@ -18,93 +17,101 @@ const PUBLIC_PROMPT_ATTRS = [
   'viewCount',
   'saveCount',
   'createdAt',
-  'updatedAt',
 ];
 
-// Author info exposed on prompts (no email — avoid leaking PII publicly).
 const AUTHOR_ATTRS = ['id', 'fullName', 'avatarUrl', 'role'];
 
-function serializeAuthor(prompt) {
-  return prompt.author
+function serializeAuthor(author) {
+  return author
     ? {
-        id: prompt.author.id,
-        fullName: prompt.author.fullName,
-        avatarUrl: prompt.author.avatarUrl,
-        role: prompt.author.role,
+        id: author.id,
+        fullName: author.fullName,
+        avatarUrl: author.avatarUrl,
+        role: author.role,
       }
     : null;
 }
 
+function toPublicPrompt(json) {
+  const out = {};
+  for (const k of PUBLIC_PROMPT_ATTRS) out[k] = json[k];
+  return out;
+}
+
 /**
- * List published prompts with the browse filters used by the UI:
- *   ?category=cinematic     — filter by category
- *   ?paid=free|paid         — filter on is_paid
- *   ?sort=trending|new|recent — default recent
- *   ?q=...                  — simple title/description/tags search
- *
- * `viewerId` (optional) additionally annotates each row with savedByMe.
+ * List published prompts with the browse filters. Firestore has no substring
+ * or cross-field OR, so the published set is filtered/sorted in memory — fine
+ * at this scale.
  */
 export async function listPrompts({ category, paid, sort, q, viewerId, limit = 50, offset = 0 }) {
-  const where = { status: 'published' };
+  const all = await queryAll({
+    collection: COLS.prompts,
+    filters: [{ field: 'status', value: 'published' }],
+    orderBy: { field: 'createdAt', direction: 'desc' },
+    limit: 10000, // load the catalog; small-scale app
+  });
 
-  if (category) where.category = category;
-  if (paid === 'free') where.isPaid = false;
-  if (paid === 'paid') where.isPaid = true;
+  let rows = all.rows;
+
+  if (category) rows = rows.filter((r) => r.category === category);
+  if (paid === 'free') rows = rows.filter((r) => !r.isPaid);
+  if (paid === 'paid') rows = rows.filter((r) => r.isPaid);
   if (q) {
-    where[Op.or] = [
-      { title: { [Op.iLike]: `%${q}%` } },
-      { description: { [Op.iLike]: `%${q}%` } },
-      { tags: { [Op.overlap]: [q] } },
-    ];
+    const needle = q.toLowerCase();
+    rows = rows.filter((r) =>
+      (r.title ?? '').toLowerCase().includes(needle) ||
+      (r.description ?? '').toLowerCase().includes(needle) ||
+      (Array.isArray(r.tags) && r.tags.some((t) => t.toLowerCase().includes(needle))),
+    );
   }
 
-  // Trending sort = derived engagement, evaluated by Postgres (no stored column).
-  const order =
-    sort === 'trending'
-      ? [sequelize.literal('"view_count" + "save_count" DESC')]
-      : [['createdAt', 'DESC']];
+  if (sort === 'trending') {
+    rows = rows.sort(
+      (a, b) =>
+        (Number(b.viewCount) + Number(b.saveCount)) -
+        (Number(a.viewCount) + Number(a.saveCount)),
+    );
+  } else {
+    rows = rows.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  }
 
-  const { rows, count } = await Prompt.findAndCountAll({
-    where,
-    attributes: PUBLIC_PROMPT_ATTRS,
-    include: [{ association: 'author', attributes: AUTHOR_ATTRS, required: false }],
-    order,
-    limit,
-    offset,
-    distinct: true,
-  });
+  const total = rows.length;
+  const page = rows.slice(offset, offset + limit);
+
+  const authorIds = [...new Set(page.map((r) => r.authorId).filter(Boolean))];
+  const authors = authorIds.length ? await getMany(COLS.users, authorIds) : {};
 
   // One query for the viewer's saved prompt ids → savedByMe set membership.
   let savedIds = new Set();
   if (viewerId) {
-    const saved = await SavedPrompt.findAll({
-      where: { userId: viewerId },
-      attributes: ['promptId'],
+    const saved = await queryAll({
+      collection: COLS.savedPrompts,
+      filters: [{ field: 'userId', value: viewerId }],
+      limit: 10000,
     });
-    savedIds = new Set(saved.map((s) => s.promptId));
+    savedIds = new Set(saved.rows.map((s) => s.promptId));
   }
 
-  const prompts = rows.map((row) => ({
-    ...row.toJSON(),
+  const prompts = page.map((row) => ({
+    ...toPublicPrompt(row),
     ...derivePromptFlags(row),
-    author: serializeAuthor(row),
+    author: serializeAuthor(authors[row.authorId] ?? null),
     savedByMe: viewerId ? savedIds.has(row.id) : false,
   }));
 
-  return { prompts, total: count, limit, offset };
+  return { prompts, total, limit, offset };
 }
 
 /**
- * Fetch one published prompt by id. `viewerId` (optional) enables paid unlock:
- * the full promptText is returned only when the prompt is free, the viewer owns it,
- * or they have a completed PromptPurchase (unlock) row. Also annotates savedByMe.
+ * Fetch one published prompt. `viewerId` (optional) enables paid unlock: the
+ * full promptText is returned only when the prompt is free, the viewer owns it,
+ * or they have a completed PromptPurchase. Also annotates savedByMe.
  */
 export async function getPromptById(id, viewerId) {
-  const prompt = await Prompt.findOne({
-    where: { id, status: 'published' },
-    include: [{ association: 'author', attributes: AUTHOR_ATTRS, required: false }],
-  });
-  if (!prompt) return null;
+  const prompt = await findByPk(COLS.prompts, id);
+  if (!prompt || prompt.status !== 'published') return null;
+
+  const author = prompt.authorId ? await findByPk(COLS.users, prompt.authorId) : null;
 
   // Free prompts are always unlocked; paid ones unlock for the owner or a buyer.
   let unlocked = !prompt.isPaid || Boolean(viewerId && prompt.authorId === viewerId);
@@ -114,33 +121,100 @@ export async function getPromptById(id, viewerId) {
     const [purchase, saved] = await Promise.all([
       unlocked
         ? null
-        : PromptPurchase.findOne({
-            where: { buyerId: viewerId, promptId: prompt.id, status: 'completed' },
-          }),
-      SavedPrompt.findOne({ where: { userId: viewerId, promptId: prompt.id } }),
+        : findByPk(COLS.promptPurchases, `${viewerId}_${id}`),
+      findByPk(COLS.savedPrompts, `${viewerId}_${id}`),
     ]);
-    if (purchase) unlocked = true;
+    if (purchase && purchase.status === 'completed') unlocked = true;
     savedByMe = Boolean(saved);
   }
 
-  const json = prompt.toJSON();
+  const json = { ...prompt };
   if (!unlocked) delete json.promptText; // gate the paid prompt body
 
   return {
     ...json,
     ...derivePromptFlags(prompt),
-    author: serializeAuthor(prompt),
+    author: serializeAuthor(author),
     savedByMe,
     unlocked,
   };
 }
 
 /**
- * Increment a prompt's view count. Fire-and-forget — failures must never fail the request.
+ * Publish a new prompt as the signed-in creator (authorId = caller). Gates:
+ * daily post limit from the current plan (Free = 3/day; Pro/Creator unlimited)
+ * and paid prompts require the Pro or Creator plan.
+ */
+export async function createPrompt({ userId, input }) {
+  const user = await findByPk(COLS.users, userId);
+  if (!user) return { error: { status: 404, message: 'User not found' } };
+
+  const sub = await currentActiveSubscriptionWithPlan(userId);
+  const plan = sub?.plan ?? null;
+
+  // GATE — daily post limit from the current plan. null = unlimited (Pro/Creator);
+  // no active sub = Free tier (3/day from the plan seed).
+  const dailyLimit = plan ? plan.dailyPostLimit : 3;
+  if (dailyLimit) {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const { rows } = await queryAll({
+      collection: COLS.prompts,
+      filters: [{ field: 'authorId', value: userId }],
+      limit: 10000,
+    });
+    const postedToday = rows.filter((r) => new Date(r.createdAt) >= startOfDay).length;
+    if (postedToday >= dailyLimit) {
+      return {
+        error: { status: 429, message: `Daily publish limit reached (${dailyLimit}/day) — upgrade to Pro/Creator for unlimited` },
+      };
+    }
+  }
+
+  // GATE — paid prompts need a paid plan with canPostPaid (Pro or Creator).
+  if (input.isPaid && !plan?.canPostPaid) {
+    return { error: { status: 403, message: 'Paid prompts require the Pro or Creator plan' } };
+  }
+
+  const id = crypto.randomUUID();
+  const now = new Date();
+  await create(COLS.prompts, id, {
+    authorId: userId,
+    title: input.title,
+    description: input.description,
+    promptText: input.promptText,
+    imageUrl: input.imageUrl ?? null,
+    category: input.category,
+    tags: input.tags ?? [],
+    isPaid: input.isPaid,
+    priceInr: input.isPaid ? input.priceInr : null,
+    status: 'published',
+    viewCount: 0,
+    saveCount: 0,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  const prompt = await findByPk(COLS.prompts, id);
+  return {
+    prompt: {
+      ...toPublicPrompt(prompt),
+      ...derivePromptFlags(prompt),
+      author: serializeAuthor({ id: user.id, fullName: user.fullName, avatarUrl: user.avatarUrl, role: user.role }),
+      savedByMe: false,
+    },
+  };
+}
+
+/**
+ * Increment a prompt's view count. Fire-and-forget — never fails the request.
  */
 export async function recordPromptView(id) {
   try {
-    await Prompt.increment('viewCount', { where: { id } });
+    await upsert(COLS.prompts, id, {
+      viewCount: increment(1),
+      updatedAt: new Date(),
+    });
   } catch {
     // non-fatal
   }
@@ -148,37 +222,48 @@ export async function recordPromptView(id) {
 
 /**
  * Save a prompt for a user (creates the join row + bumps save_count).
- * Idempotent: saving twice is a no-op. Returns the updated save count.
+ * Idempotent. Returns the updated save count.
  */
 export async function savePrompt(promptId, userId) {
-  const prompt = await Prompt.findByPk(promptId);
+  const prompt = await findByPk(COLS.prompts, promptId);
   if (!prompt) return { notFound: true };
 
-  const [, created] = await SavedPrompt.findOrCreate({
-    where: { userId, promptId },
-  });
-  if (created) {
-    await Prompt.increment('saveCount', { where: { id: promptId } });
+  const key = `${userId}_${promptId}`;
+  const existing = await findByPk(COLS.savedPrompts, key);
+  let created = false;
+  if (!existing) {
+    await upsert(COLS.savedPrompts, key, {
+      userId,
+      promptId,
+      savedAt: new Date(),
+    });
+    created = true;
   }
 
-  const updated = await Prompt.findByPk(promptId, { attributes: ['saveCount'] });
-  return { saved: true, saveCount: updated.saveCount };
+  let saveCount = Number(prompt.saveCount) || 0;
+  if (created) {
+    await upsert(COLS.prompts, promptId, { saveCount: increment(1), updatedAt: new Date() });
+    saveCount += 1;
+  }
+
+  return { saved: true, saveCount };
 }
 
 /**
- * Unsave a prompt for a user (removes the join row + decrements save_count, floor 0).
+ * Unsave a prompt (removes the join row + decrements save_count, floor 0).
  * Idempotent. Returns the updated save count.
  */
 export async function unsavePrompt(promptId, userId) {
-  const deleted = await SavedPrompt.destroy({ where: { userId, promptId } });
+  const key = `${userId}_${promptId}`;
+  const deleted = await remove(COLS.savedPrompts, key);
+
   if (deleted) {
-    // Floor at 0 so a stale counter can never go negative.
-    await Prompt.decrement('saveCount', {
-      by: 1,
-      where: { id: promptId, saveCount: { [Op.gt]: 0 } },
+    await upsert(COLS.prompts, promptId, {
+      saveCount: increment(-1),
+      updatedAt: new Date(),
     });
   }
 
-  const updated = await Prompt.findByPk(promptId, { attributes: ['saveCount'] });
-  return { saved: false, saveCount: updated ? updated.saveCount : 0 };
+  const prompt = await findByPk(COLS.prompts, promptId);
+  return { saved: false, saveCount: Math.max(Number(prompt?.saveCount) || 0, 0) };
 }

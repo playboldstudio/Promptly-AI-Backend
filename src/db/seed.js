@@ -1,55 +1,19 @@
-import './models.js'; // registers all models + associations
-import { sequelize } from './config.js';
-import {
-  User,
-  SubscriptionPlan,
-  Prompt,
-  BankAccount,
-  KycVerification,
-} from './models.js';
+import { pathToFileURL } from 'node:url';
+import { COLS, findByPk, upsert } from '../db/firestoreRepo.js';
 
 /**
- * `npm run db:seed` — idempotent starter data.
- *
- * Upserts (by primary key / unique field) so re-running is safe:
- *   - 3 subscription plans (free / pro / creator)
- *   - 1 demo creator user
- *   - 5 prompts (free + paid mix) authored by the demo creator
- *   - a saved UPI ID for the demo creator, so the manual-settle payout flow is
- *     testable (request → admin pays via UPI → admin marks paid)
+ * `npm run db:seed` — idempotent starter data for Firestore:
+ * 3 subscription plans, 5 prompts (free + paid), and a demo author.
+ * Safe to re-run — existing docs are merged, not duplicated.
  */
 
 const PLANS = [
-  {
-    id: 'free',
-    name: 'Free',
-    priceInr: 0,
-    billingCycle: 'monthly',
-    dailyPostLimit: 3,
-    canPostPaid: false,
-    platformFeePercent: 0,
-  },
-  {
-    id: 'pro',
-    name: 'Pro',
-    priceInr: 49,
-    billingCycle: 'monthly',
-    dailyPostLimit: null, // unlimited
-    canPostPaid: false,
-    platformFeePercent: 5,
-  },
-  {
-    id: 'creator',
-    name: 'Creator',
-    priceInr: 99,
-    billingCycle: 'monthly',
-    dailyPostLimit: null, // unlimited
-    canPostPaid: true,
-    platformFeePercent: 0,
-  },
+  { id: 'free', name: 'Free', priceInr: 0, billingCycle: 'monthly', dailyPostLimit: 3, canPostPaid: false, platformFeePercent: 0 },
+  { id: 'pro', name: 'Pro', priceInr: 49, billingCycle: 'monthly', dailyPostLimit: null, canPostPaid: true, platformFeePercent: 5 },
+  { id: 'creator', name: 'Creator', priceInr: 99, billingCycle: 'monthly', dailyPostLimit: null, canPostPaid: true, platformFeePercent: 0 },
 ];
 
-const DEMO_EMAIL = 'demo@promptly.app';
+const DEMO_USER_ID = 'demo_creator';
 
 const PROMPTS = [
   {
@@ -119,74 +83,57 @@ const PROMPTS = [
   },
 ];
 
-async function main() {
-  console.log('Seeding…');
+/** Deterministic prompt doc id from the title (stable across re-seeds). */
+function slug(title) {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
 
-  // 1. Subscription plans
+async function main() {
+  console.log('Seeding Firestore…');
+
   for (const plan of PLANS) {
-    await SubscriptionPlan.upsert(plan);
+    await upsert(COLS.subscriptionPlans, plan.id, {
+      ...plan,
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
   }
   console.log(`  ✅ ${PLANS.length} subscription plans`);
 
-  // 2. Demo creator
-  const [creator] = await User.findOrCreate({
-    where: { email: DEMO_EMAIL },
-    defaults: {
-      authProviderId: DEMO_EMAIL,
-      fullName: 'Demo Creator',
-      role: 'creator',
-    },
+  // Demo author user (matches the demo creator).
+  await upsert(COLS.users, DEMO_USER_ID, {
+    authProviderId: 'demo@promptly.app',
+    email: 'demo@promptly.app',
+    fullName: 'Demo Creator',
+    role: 'creator',
+    upiId: 'demo@upi',
+    avatarUrl: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
   });
   console.log('  ✅ demo creator user');
 
-  // 3. Prompts (upsert by unique title so re-seeds don't duplicate)
   for (const prompt of PROMPTS) {
-    await Prompt.findOrCreate({
-      where: { title: prompt.title },
-      defaults: { ...prompt, authorId: creator.id },
+    const id = slug(prompt.title);
+    await upsert(COLS.prompts, id, {
+      ...prompt,
+      authorId: DEMO_USER_ID,
+      createdAt: new Date(),
+      updatedAt: new Date(),
     });
   }
   console.log(`  ✅ ${PROMPTS.length} prompts`);
 
-  // 4. Demo creator UPI ID (manual-settle destination — no KYC/bank needed).
-  //    findOrCreate won't touch an existing row, so update is used to make sure
-  //    a previously-seeded demo user also gets the UPI on re-seed.
-  await User.update({ upiId: 'demo@upi' }, { where: { email: DEMO_EMAIL } });
-  console.log('  ✅ demo creator UPI (demo@upi)');
-
-  // 5. Demo creator KYC (verified) — legacy; the payout flow no longer requires
-  //    KYC. Kept only so older screens/tests that read kycStatus still see it.
-  await KycVerification.findOrCreate({
-    where: { userId: creator.id },
-    defaults: {
-      fullName: creator.fullName,
-      pan: 'DEMOPAN123', // hashed in production
-      status: 'verified',
-      submittedAt: new Date(),
-      verifiedAt: new Date(),
-    },
-  });
-  console.log('  ✅ demo creator KYC (verified, legacy)');
-
-  // 6. Demo creator bank account — legacy; manual settle now pays via UPI.
-  await BankAccount.findOrCreate({
-    where: { userId: creator.id },
-    defaults: {
-      accountHolder: creator.fullName,
-      bankName: 'HDFC Bank',
-      accountNumberLast4: '4321',
-      ifsc: 'HDFC0001234',
-      accountNumberFull: '50100234567890', // TEST only — encrypt before prod
-    },
-  });
-  console.log('  ✅ demo creator bank account (legacy)');
-
-  await sequelize.close();
   console.log('✅ Seed complete.');
 }
 
-main().catch(async (err) => {
-  console.error('❌ Seed failed:', err.message);
-  await sequelize.close().catch(() => {});
-  process.exit(1);
-});
+export default main;
+
+// Run directly (`node src/db/seed.js`) or via `npm run db:seed`.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error('❌ Seed failed:', err.message);
+    process.exit(1);
+  });
+}

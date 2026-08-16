@@ -1,48 +1,98 @@
-import { Payout, User } from '../../db/models.js';
-import { sequelize } from '../../db/config.js';
+import { COLS, findByPk, queryAll, inTxGet, inTxAdd, inTxSet, inTxQueryAll } from '../../db/firestoreRepo.js';
+import { runTransaction } from '../../db/config.js';
+import { env } from '../../config/env.js';
 import { writeLedger } from '../ledger.js';
+import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 
-/**
- * CREATOR PAYOUTS — MANUAL SETTLE (solo developer; no RazorpayX).
- *
- * ⚠️ RazorpayX Payouts (automatic bank transfer to a third party) is BUSINESS-
- * only — a solo individual can't get a payout route. So the flow is:
- *
- *   Creator balance ──(request, min ₹60)──► Payout row (pending, upiId)
- *        admin transfers ₹ to the creator's UPI via their OWN UPI app (NOT Razorpay)
- *        admin marks the payout paid/failed in the app
- *        creator sees "Processing → Paid" in My Account
- *
- * No KYC and no bank account are required — the creator just saves a UPI ID on
- * their profile (POST /me/upi), and the payout snapshots it at request time so
- * a later UPI change never redirects a pending payment.
- *
- * requestPayout({ userId, amountInr }):
- *   1. GATE: user has a saved upi_id (the destination; POST /me/upi sets it)
- *   2. RULE: amountInr >= 60 (min withdrawal)
- *   3. RULE: amountInr <= available balance (ledger credits − debits)
- *   4. Writes a Payout row (status pending, upiId snapshot) + a ledger debit
- *      (type = payout) in one transaction, so the balance is reserved the
- *      moment the request lands.
- *
- * Admin (solo = the developer): /admin/payouts lists pending, and
- * markPayoutPaid()/markPayoutFailed() flip status + processed_at after the
- * money is transferred. The ledger debit already happened at request time, so
- * "paid" is just bookkeeping — this is why the balance is *reserved*, not
- * withdrawn, while pending.
- */
+const MIN_WITHDRAWAL_INR = env.MIN_WITHDRAWAL_INR;
 
-const MIN_WITHDRAWAL_INR = 60;
+/** Flat Razorpay UPI-transfer fee charged on every withdrawal. */
+const RAZORPAY_FEE_PERCENT = 2;
 
-/** Return a 4xx-style error object, matching the other services' shape. */
 function err(status, message) {
   return { error: { status, message } };
 }
 
 /**
- * Request a withdrawal. Creates the Payout + reserves the balance atomically.
- * @returns {{ payout } | {error}}
+ * Fee breakdown for a withdrawal. Fees are DEDUCTED from the requested amount:
+ * the admin pays `netInr` to the creator's UPI, the platform keeps the rest.
+ * `platformFeePercent` comes from the creator's plan (Pro=5%, Creator=0%).
  */
+function payoutFees(amountInr, platformFeePercent = 0) {
+  const razorpayFeeInr = Math.round((amountInr * RAZORPAY_FEE_PERCENT) / 100);
+  const platformFeeInr = Math.round((amountInr * (platformFeePercent || 0)) / 100);
+  const feeInr = razorpayFeeInr + platformFeeInr;
+  return {
+    razorpayFeeInr,
+    platformFeeInr,
+    feeInr,
+    netInr: amountInr - feeInr,
+  };
+}
+
+/**
+ * True withdrawable balance — ONLY money earned from paid prompt sales (the
+ * author's net share), minus what has already been withdrawn or is reserved by
+ * an in-flight payout. Wallet-ledger rows for buyer purchases, subscription
+ * payments, and corrections do NOT count toward what a creator can withdraw.
+ * Returns a non-negative amount.
+ */
+export async function withdrawableBalanceFor(userId) {
+  const [sales, payouts] = await Promise.all([
+    queryAll({
+      collection: COLS.promptPurchases,
+      filters: [{ field: 'authorId', value: userId }, { field: 'status', value: 'completed' }],
+    }),
+    queryAll({ collection: COLS.payouts, filters: [{ field: 'userId', value: userId }] }),
+  ]);
+
+  const earnedInr = sales.rows.reduce((sum, s) => sum + (Number(s.netInr) || 0), 0);
+  const reservedInr = payouts.rows
+    .filter((p) => ['pending', 'processing', 'paid'].includes(p.status))
+    .reduce((sum, p) => sum + (Number(p.amountInr) || 0), 0);
+
+  return Math.max(0, earnedInr - reservedInr);
+}
+
+/**
+ * Withdrawal eligibility — the authoritative rules the app should surface.
+ * A creator can withdraw when they hold an active Pro/Creator plan, have a
+ * saved UPI destination, and their sales earnings meet the minimum.
+ */
+export async function withdrawalEligibility(userId) {
+  const user = await findByPk(COLS.users, userId);
+  const sub = await currentActiveSubscriptionWithPlan(userId);
+  const planId = sub?.planId;
+  const platformFeePercent = sub?.plan?.platformFeePercent ?? 0;
+  const withdrawable = await withdrawableBalanceFor(userId);
+
+  const hasUpi = Boolean(user?.upiId);
+  const hasPaidPlan = planId === 'pro' || planId === 'creator';
+  const meetsMinimum = withdrawable >= MIN_WITHDRAWAL_INR;
+
+  const blockers = [];
+  if (!hasPaidPlan) blockers.push('Upgrade to Pro or Creator to withdraw');
+  if (!hasUpi) blockers.push('Add your UPI ID on your profile before withdrawing');
+  if (!meetsMinimum) blockers.push(`Earnings below the ₹${MIN_WITHDRAWAL_INR} withdrawal minimum`);
+
+  const fees = payoutFees(withdrawable, platformFeePercent);
+
+  return {
+    withdrawableBalance: withdrawable,
+    minWithdrawalInr: MIN_WITHDRAWAL_INR,
+    eligible: blockers.length === 0,
+    blockers,
+    hasUpi,
+    hasPaidPlan,
+    meetsMinimum,
+    currency: 'INR',
+    razorpayFeePercent: RAZORPAY_FEE_PERCENT,
+    platformFeePercent,
+    estimatedFeeInr: fees.feeInr,
+    estimatedNetInr: fees.netInr,
+  };
+}
+
 export async function requestPayout({ userId, amountInr }) {
   if (!Number.isInteger(amountInr) || amountInr <= 0) {
     return err(400, 'Amount must be a positive whole number (rupees)');
@@ -51,111 +101,232 @@ export async function requestPayout({ userId, amountInr }) {
     return err(400, `Minimum withdrawal is ₹${MIN_WITHDRAWAL_INR}`);
   }
 
-  const user = await User.findByPk(userId);
+  const user = await findByPk(COLS.users, userId);
+  if (!user) return err(404, 'User not found');
+
+  // GATE 1 — payouts are for subscribed creators (Pro/Creator) only.
+  const sub = await currentActiveSubscriptionWithPlan(userId);
+  const planId = sub?.planId;
+  if (planId !== 'pro' && planId !== 'creator') {
+    return err(403, 'Subscriber only — upgrade to Pro or Creator before withdrawing');
+  }
+
+  // Fee breakdown: 2% Razorpay + the plan's platform fee, deducted from payout.
+  const fees = payoutFees(amountInr, sub?.plan?.platformFeePercent ?? 0);
+
+  // GATE 2 — the creator needs a saved UPI payout destination.
   if (!user?.upiId) {
     return err(400, 'Add your UPI ID on your profile before withdrawing');
   }
 
-  const balance = await availableBalance(userId);
-  if (amountInr > balance) {
-    return err(400, `Insufficient balance — you can withdraw up to ₹${balance}`);
+  // GATE 5 — one in-flight withdrawal at a time (idempotency).
+  // Soft-pre-check for a fast 409; the authoritative check runs inside the
+  // transaction below so two concurrent requests cannot both pass.
+
+  // GATE 6 — the user may only withdraw money earned from paid prompt sales.
+  const sales = await queryAll({
+    collection: COLS.promptPurchases,
+    filters: [{ field: 'authorId', value: userId }, { field: 'status', value: 'completed' }],
+  });
+  const earnedInr = sales.rows.reduce((sum, s) => sum + (Number(s.netInr) || 0), 0);
+
+  const withdrawable = await withdrawableBalanceFor(userId);
+  if (amountInr > withdrawable) {
+    return err(400, `Insufficient sales earnings — you can withdraw up to ₹${withdrawable}`);
   }
 
   try {
-    const payout = await sequelize.transaction(async (t) => {
-      const created = await Payout.create(
-        { userId, amountInr, status: 'pending', upiId: user.upiId },
-        { transaction: t },
+    const { id: payoutId, balanceAfterInr } = await runTransaction(async (tx) => {
+      // Authoritative in-flight check inside the transaction (race-safe), using
+      // the same query that recounts the reserved payout amounts below.
+      const payoutsInTx = await inTxQueryAll(tx, {
+        collection: COLS.payouts,
+        filters: [{ field: 'userId', value: userId }],
+        limit: 100,
+      });
+      const inFlight = payoutsInTx.find(
+        (p) => p.status === 'pending' || p.status === 'processing',
       );
-      // Reserve the amount: a debit now, "paid" later is pure bookkeeping.
+      if (inFlight) {
+        throw Object.assign(new Error('in-flight'), { inFlight: true });
+      }
+
+      // Re-count the reserved amount inside the transaction (authoritative):
+      // earned sales minus pending/processing/paid payouts.
+      const reservedInTx = payoutsInTx
+        .filter((p) => ['pending', 'processing', 'paid'].includes(p.status))
+        .reduce((sum, p) => sum + (Number(p.amountInr) || 0), 0);
+      const withdrawableInTx = Math.max(0, earnedInr - reservedInTx);
+      if (amountInr > withdrawableInTx) {
+        throw Object.assign(new Error('insufficient'), { insufficient: true });
+      }
+
+      // Wallet balance for the ledger row (bookkeeping of the reservation only).
+      const balDoc = await inTxGet(tx, COLS.userBalances, userId);
+      const bal = Number(balDoc?.balanceInr ?? 0);
+
+      const ref = inTxAdd(tx, COLS.payouts, {
+        userId,
+        amountInr,
+        status: 'pending',
+        upiId: user.upiId ?? null,
+        razorpayPayoutId: null,
+        bankAccountId: null,
+        razorpayFeeInr: fees.razorpayFeeInr,
+        platformFeeInr: fees.platformFeeInr,
+        feeInr: fees.feeInr,
+        netInr: fees.netInr,
+        processedAt: null,
+        failureReason: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      // Reserve the full requested amount: a debit now, "paid" later is pure
+      // bookkeeping. The admin transfers only `netInr` to the creator's UPI.
       await writeLedger(
+        tx,
         {
           userId,
           type: 'payout',
           direction: 'debit',
           amountInr,
-          refId: created.id,
-          note: 'Withdrawal request (manual settle via UPI, pending)',
+          refId: ref.id,
+          note: `Withdrawal — ₹${amountInr} minus ₹${fees.feeInr} fees (2% Razorpay${fees.platformFeeInr ? ` + ${sub?.plan?.platformFeePercent ?? 0}% platform` : ''}), ${fees.netInr} to UPI`,
+          balanceInr: bal,
         },
-        t,
       );
-      return created;
+
+      return { id: ref.id, balanceAfterInr: withdrawableInTx - amountInr };
     });
 
+    const payout = await findByPk(COLS.payouts, payoutId);
     return {
       payout: {
         id: payout.id,
         amountInr: payout.amountInr,
         status: payout.status,
         upiId: payout.upiId,
+        razorpayFeeInr: payout.razorpayFeeInr,
+        platformFeeInr: payout.platformFeeInr,
+        feeInr: payout.feeInr,
+        netInr: payout.netInr,
         createdAt: payout.createdAt,
       },
+      balanceInr: balanceAfterInr,
+      minWithdrawalInr: MIN_WITHDRAWAL_INR,
+      currency: 'INR',
     };
-  } catch (err) {
-    // Out-of-order writes or a constraint hit — surface as 409 rather than a raw 500.
+  } catch (error) {
+    if (error.inFlight) {
+      return err(409, 'You already have a withdrawal in progress — wait for it to settle');
+    }
+    if (error.insufficient) {
+      return err(400, 'Insufficient balance — the amount you requested is no longer available');
+    }
     return { error: { status: 409, message: 'Could not create the payout — try again' } };
   }
 }
 
 /**
- * Admin — list payout requests with the transfer details the admin needs
- * (each row carries the UPI ID to pay to, plus the requesting user).
- * Not the endpoint a regular user calls; gate it with a real admin check
- * (this is dev: any authed user can hit it — document + lock before launch).
- * @returns {Promise<{ payouts: Payout[] }>}
+ * A user's own payout history (id, amount, status, dates, failure reason).
  */
-export async function listPayouts({ status, limit = 50, offset = 0 } = {}) {
-  const where = {};
-  if (status && ['pending', 'processing', 'paid', 'failed'].includes(status)) {
-    where.status = status;
-  }
-  const { rows, count } = await Payout.findAndCountAll({
-    where,
-    include: [
-      { association: 'user', attributes: ['id', 'fullName', 'email'] },
-    ],
-    order: [['createdAt', 'DESC']],
+export async function listUserPayouts(userId, { limit = 50, offset = 0 } = {}) {
+  const { rows } = await queryAll({
+    collection: COLS.payouts,
+    filters: [{ field: 'userId', value: userId }],
+    orderBy: { field: 'createdAt', direction: 'desc' },
     limit: Math.min(limit, 100),
     offset: Math.max(offset, 0),
-    distinct: true,
   });
-  return { payouts: rows, total: count };
+  return { payouts: rows, total: rows.length };
+}
+
+/**
+ * Admin — list payout requests with the transfer details the admin needs.
+ */
+export async function listPayouts({ status, limit = 50, offset = 0 } = {}) {
+  const filters = [];
+  if (status && ['pending', 'processing', 'paid', 'failed'].includes(status)) {
+    filters.push({ field: 'status', value: status });
+  }
+  const { rows } = await queryAll({
+    collection: COLS.payouts,
+    filters,
+    orderBy: { field: 'createdAt', direction: 'desc' },
+    limit: Math.min(limit, 100),
+    offset: Math.max(offset, 0),
+  });
+
+  // Embed the requesting user (id, fullName, email) like the previous SQL join.
+  const maybeUsers = await Promise.all(
+    rows.map(async (p) => {
+      const user = await findByPk(COLS.users, p.userId);
+      return { ...p, user: user ? { id: user.id, fullName: user.fullName, email: user.email } : null };
+    }),
+  );
+
+  return { payouts: maybeUsers, total: rows.length };
 }
 
 /**
  * Admin — mark a pending payout PAID after transferring the money manually.
- * @returns {{ payout } | {error}}
  */
 export async function markPayoutPaid({ payoutId }) {
-  const payout = await Payout.findByPk(payoutId);
-  if (!payout) return err(404, 'Payout not found');
-  if (payout.status !== 'pending') {
-    return err(409, `Payout is already ${payout.status}`);
-  }
-  await payout.update({ status: 'paid', processedAt: new Date() });
-  return { payout };
-}
-
-/**
- * Admin — mark a pending payout FAILED (money not sent). The reserved balance
- * is released back to the creator.
- * @returns {{ payout } | {error}}
- */
-export async function markPayoutFailed({ payoutId, reason }) {
-  const payout = await Payout.findByPk(payoutId);
+  const payout = await findByPk(COLS.payouts, payoutId);
   if (!payout) return err(404, 'Payout not found');
   if (payout.status !== 'pending') {
     return err(409, `Payout is already ${payout.status}`);
   }
 
   try {
-    await sequelize.transaction(async (t) => {
-      await payout.update(
-        { status: 'failed', processedAt: new Date(), failureReason: reason ?? null },
-        { transaction: t },
-      );
+    await runTransaction(async (tx) => {
+      const fresh = await inTxGet(tx, COLS.payouts, payoutId);
+      if (!fresh || fresh.status !== 'pending') {
+        throw Object.assign(new Error('already-claimed'), { claimed: true });
+      }
+      inTxSet(tx, COLS.payouts, payoutId, {
+        status: 'paid',
+        processedAt: new Date(),
+        updatedAt: new Date(),
+      });
+    });
+    const updated = await findByPk(COLS.payouts, payoutId);
+    return { payout: updated };
+  } catch (error) {
+    if (error.claimed) return err(409, 'Payout is no longer pending');
+    return { error: { status: 409, message: 'Could not update the payout — try again' } };
+  }
+}
+
+/**
+ * Admin — mark a pending payout FAILED. The reserved balance is returned.
+ */
+export async function markPayoutFailed({ payoutId, reason }) {
+  const payout = await findByPk(COLS.payouts, payoutId);
+  if (!payout) return err(404, 'Payout not found');
+  if (payout.status !== 'pending') {
+    return err(409, `Payout is already ${payout.status}`);
+  }
+
+  try {
+    await runTransaction(async (tx) => {
+      const fresh = await inTxGet(tx, COLS.payouts, payoutId);
+      if (!fresh || fresh.status !== 'pending') {
+        throw Object.assign(new Error('already-claimed'), { claimed: true });
+      }
+      // Pre-read the balance BEFORE writing so the reversal writes a valid ledger.
+      const balDoc = await inTxGet(tx, COLS.userBalances, payout.userId);
+      const bal = Number(balDoc?.balanceInr ?? 0);
+      inTxSet(tx, COLS.payouts, payoutId, {
+        status: 'failed',
+        processedAt: new Date(),
+        failureReason: reason ?? null,
+        updatedAt: new Date(),
+      });
       // Reverse the reservation so the creator can re-request.
       await writeLedger(
+        tx,
         {
           userId: payout.userId,
           type: 'payout',
@@ -163,26 +334,14 @@ export async function markPayoutFailed({ payoutId, reason }) {
           amountInr: payout.amountInr,
           refId: payout.id,
           note: 'Withdrawal failed — balance returned',
+          balanceInr: bal,
         },
-        t,
       );
     });
-    return { payout };
-  } catch (err) {
+    const updated = await findByPk(COLS.payouts, payoutId);
+    return { payout: updated };
+  } catch (error) {
+    if (error.claimed) return err(409, 'Payout is no longer pending');
     return { error: { status: 409, message: 'Could not update the payout — try again' } };
   }
-}
-
-/**
- * Available balance = ledger credits − debits, minus anything already reserved
- * by a still-pending payout (those debits are in the ledger, so this is really
- * just the ledger total — kept explicit for clarity).
- */
-async function availableBalance(userId) {
-  const rows = await sequelize.query(
-    `SELECT COALESCE(SUM(CASE WHEN direction='credit' THEN amount_inr ELSE -amount_inr END), 0) AS balance
-       FROM transactions WHERE user_id = $1`,
-    { bind: [userId], type: sequelize.QueryTypes.SELECT },
-  );
-  return Number(rows[0]?.balance) || 0;
 }

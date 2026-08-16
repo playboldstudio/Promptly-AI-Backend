@@ -1,0 +1,23 @@
+rules_version = '2';
+
+// Promptly AI — Firestore security rules.
+//
+// The backend runs on Cloud Run with the Firebase Admin SDK, which BYPASSES
+// these rules entirely. All reads/writes for the app go through the Express API
+// (/prompts, /me, /payments, ...). The mobile app is UI-only today and never
+// talks to Firestore directly.
+//
+// Decision: keep everything behind the API. These rules DENY ALL client-side
+// access so a future accidental Firestore SDK connection can't read or write
+// data (paid prompt text, PII, ledger) without going through the server.
+//
+// If the app is later given direct read access, relax only the specific
+// collections/fields it needs and keep writes server-side.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

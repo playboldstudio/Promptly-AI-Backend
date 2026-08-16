@@ -1,20 +1,18 @@
-import './models.js'; // side-effect: registers all models + associations on the sequelize instance
-import { sequelize } from './config.js';
+import { pingDb } from './config.js';
 
 /**
- * `npm run db:sync`
- *
- * Creates/updates tables from the model definitions (dev convenience).
- * `alter: true` applies column changes in place.
- *
- * ⚠️ Before production, switch to real migrations (sequelize-cli) — `sync({ alter })`
- * is not safe for schema changes on a live database.
+ * `npm run db:sync` — Firestore is schemaless; this verifies connectivity so a
+ * deploy can sanity-check before boot.
  */
 async function main() {
-  console.log('Syncing schema…');
-  await sequelize.sync({ alter: true });
-  console.log('✅ Schema synced.');
-  await sequelize.close();
+  console.log('Checking Firestore connectivity…');
+  const ok = await pingDb();
+  if (!ok) {
+    console.error('❌ Firestore unreachable — check FIREBASE_PROJECT_ID and credentials.');
+    process.exit(1);
+  }
+  console.log('✅ Firestore reachable. Schema is implicit (no tables to sync).');
+  process.exit(0);
 }
 
 main().catch((err) => {

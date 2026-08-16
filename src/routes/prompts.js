@@ -1,14 +1,16 @@
-import { Router } from 'express';
+import { Router, raw } from 'express';
+import { z } from 'zod';
 import {
   listPrompts,
   getPromptById,
   recordPromptView,
   savePrompt,
   unsavePrompt,
+  createPrompt,
 } from '../services/prompts.service.js';
 import { optionalAuth, requireAuth } from '../middleware/auth.js';
+import { uploadImage } from '../services/storage.service.js';
 
-// Mirrors the Prompt.category enum in src/db/models/Prompt.js.
 const PROMPT_CATEGORIES = [
   'portrait',
   'fashion',
@@ -23,15 +25,80 @@ const PROMPT_CATEGORIES = [
 
 const router = Router();
 
+const createPromptSchema = z
+  .object({
+    title: z.string().trim().min(1).max(140),
+    description: z.string().trim().min(1).max(2000),
+    promptText: z.string().trim().min(1),
+    imageUrl: z.string().trim().url().optional().nullable(),
+    category: z.enum(PROMPT_CATEGORIES),
+    tags: z.array(z.string().trim().min(1)).max(20).default([]),
+    isPaid: z.boolean().default(false),
+    priceInr: z.number().int().positive().optional().nullable(),
+  })
+  .refine((v) => !v.isPaid || (v.isPaid && v.priceInr), {
+    message: 'A paid prompt requires a positive priceInr',
+    path: ['priceInr'],
+  });
+
+/**
+ * POST /prompts — creator publish. Authenticated; authorId is the caller.
+ * Gates: daily post limit from the plan (Free=3/day, Pro/Creator unlimited)
+ * and paid prompts require the Pro or Creator plan (canPostPaid).
+ */
+router.post('/prompts', requireAuth, async (req, res, next) => {
+  try {
+    const parsed = createPromptSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      const err = new Error(parsed.error.issues[0]?.message ?? 'Invalid prompt body');
+      err.status = 400;
+      return next(err);
+    }
+    const result = await createPrompt({ userId: req.userId, input: parsed.data });
+    if (result.error) {
+      const { status, message } = result.error;
+      const err = new Error(message);
+      err.status = status;
+      return next(err);
+    }
+    return res.status(201).json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * POST /prompts/image — upload a prompt cover image (raw body, e.g. image/jpeg).
+ * Returns { imageUrl } — pass that URL to POST /prompts as imageUrl.
+ */
+router.post(
+  '/prompts/image',
+  requireAuth,
+  raw({ type: 'image/*', limit: '3mb' }),
+  async (req, res, next) => {
+    try {
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        const err = new Error('Send the image file as the raw request body (image/jpeg, image/png, …)');
+        err.status = 400;
+        return next(err);
+      }
+      const contentType = String(req.headers['content-type'] ?? 'image/jpeg').split(';')[0].trim();
+      const imageUrl = await uploadImage({
+        folder: `prompts/${req.userId}`,
+        buffer: req.body,
+        contentType,
+      });
+      return res.status(201).json({ imageUrl });
+    } catch (err) {
+      return next(err);
+    }
+  },
+);
+
 /**
  * GET /prompts
- * Query params:
- *   category  — PromptCategory enum value
- *   paid      — "free" | "paid"
- *   sort      — "trending" | "new" | "recent"
- *   q         — search text (title/description/tags)
- *   limit     — page size (default 50)
- *   offset    — page offset (default 0)
+ * Query params: category, paid ("free"|"paid"), sort (trending|new|recent),
+ * q, limit, offset.
  */
 // Optional auth → each row is annotated with savedByMe for the signed-in viewer.
 router.get('/prompts', optionalAuth, async (req, res, next) => {
@@ -67,9 +134,7 @@ router.get('/prompts', optionalAuth, async (req, res, next) => {
 });
 
 /**
- * GET /prompts/:id
- * Optional auth — a signed-in viewer unlocks the paid prompt text if they own it
- * or have a completed purchase. Free prompts always include prompt_text.
+ * GET /prompts/:id — optional auth unlocks paid prompt text for owners/buyers.
  */
 router.get('/prompts/:id', optionalAuth, async (req, res, next) => {
   try {
@@ -90,8 +155,7 @@ router.get('/prompts/:id', optionalAuth, async (req, res, next) => {
 });
 
 /**
- * POST /prompts/:id/save — save a prompt for the signed-in user.
- * Idempotent. Returns { saved, saveCount } for the UI to update the button/counter.
+ * POST /prompts/:id/save — idempotent. Returns { saved, saveCount }.
  */
 router.post('/prompts/:id/save', requireAuth, async (req, res, next) => {
   try {
@@ -108,8 +172,7 @@ router.post('/prompts/:id/save', requireAuth, async (req, res, next) => {
 });
 
 /**
- * POST /prompts/:id/unsave — remove the save. Idempotent.
- * Returns { saved: false, saveCount } so the UI can flip the button back.
+ * POST /prompts/:id/unsave — idempotent. Returns { saved: false, saveCount }.
  */
 router.post('/prompts/:id/unsave', requireAuth, async (req, res, next) => {
   try {

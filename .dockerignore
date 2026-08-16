@@ -1,0 +1,27 @@
+node_modules
+npm-debug.log
+test
+.env
+.env.local
+.env.*.local
+!.env.example
+.git
+.gitignore
+README.md
+CLOUD_RUN_DEPLOYMENT.md
+PAYOUT_ARCHITECTURE.md
+*.log
+.DS_Store
+
+# Service-account keys / credentials — never ship secrets.
+*service-account*.json
+*-service-account*.json
+credentials.json
+key.json
+gcp-key.json
+
+# Local dev only
+.idea
+.kotlin
+.gradle
+build/

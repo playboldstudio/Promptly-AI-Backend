@@ -1,8 +1,10 @@
-import { Router } from 'express';
+import { Router, raw } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
-import { getProfile, getMyPrompts, getSavedPrompts, getTransactions } from '../services/me.service.js';
+import { isAdminEmail } from '../config/env.js';
+import { getProfile, getMyPrompts, getSavedPrompts, getTransactions, setUpiId, updateProfile } from '../services/me.service.js';
 import { getEarningsSummary, getEarningsByPrompt } from '../services/earnings.service.js';
+import { uploadImage } from '../services/storage.service.js';
 
 const router = Router();
 
@@ -16,22 +18,26 @@ const upiSchema = z.object({
     .regex(/^[\w.\-]+@[a-zA-Z]+$/, 'Enter a valid UPI ID like name@upi'),
 });
 
+const profilePatchSchema = z.object({
+  fullName: z.string().trim().min(1).max(120).optional(),
+  bio: z.string().trim().max(300).optional(),
+  avatarUrl: z.string().trim().url().max(1000).optional(),
+});
+
 const paging = (req) => ({
   limit: Math.min(Number(req.query.limit) || 50, 100),
   offset: Math.max(Number(req.query.offset) || 0, 0),
 });
 
-/** GET /me/profile — profile + current subscription + KYC state. */
 router.get('/profile', async (req, res, next) => {
   try {
     const profile = await getProfile(req.userId);
-    return res.json({ user: req.user, ...profile });
+    return res.json({ user: req.user, isAdmin: isAdminEmail(req.user?.email), ...profile });
   } catch (err) {
     return next(err);
   }
 });
 
-/** GET /me/prompts — prompts the user published. */
 router.get('/prompts', async (req, res, next) => {
   try {
     const result = await getMyPrompts(req.userId, paging(req));
@@ -41,7 +47,6 @@ router.get('/prompts', async (req, res, next) => {
   }
 });
 
-/** GET /me/saved — saved prompts (join table). */
 router.get('/saved', async (req, res, next) => {
   try {
     const result = await getSavedPrompts(req.userId, paging(req));
@@ -51,7 +56,6 @@ router.get('/saved', async (req, res, next) => {
   }
 });
 
-/** GET /me/transactions — the My Account ledger, newest first. */
 router.get('/transactions', async (req, res, next) => {
   try {
     const result = await getTransactions(req.userId, paging(req));
@@ -61,7 +65,6 @@ router.get('/transactions', async (req, res, next) => {
   }
 });
 
-/** GET /me/earnings — creator earnings summary (lifetime, withdrawn, pending, balance). */
 router.get('/earnings', async (req, res, next) => {
   try {
     const summary = await getEarningsSummary(req.userId);
@@ -71,7 +74,6 @@ router.get('/earnings', async (req, res, next) => {
   }
 });
 
-/** GET /me/earnings/prompts — per-prompt earnings breakdown. */
 router.get('/earnings/prompts', async (req, res, next) => {
   try {
     const rows = await getEarningsByPrompt(req.userId);
@@ -81,7 +83,6 @@ router.get('/earnings/prompts', async (req, res, next) => {
   }
 });
 
-/** POST /me/upi — save the UPI ID the admin pays withdrawals to. */
 router.post('/upi', async (req, res, next) => {
   try {
     const parsed = upiSchema.safeParse(req.body ?? {});
@@ -90,11 +91,59 @@ router.post('/upi', async (req, res, next) => {
       err.status = 400;
       return next(err);
     }
-    await req.user.update({ upiId: parsed.data.upiId });
-    return res.json({ user: req.user });
+    const user = await setUpiId(req.userId, parsed.data.upiId);
+    return res.json({ user });
   } catch (err) {
     return next(err);
   }
 });
+
+/**
+ * PATCH /me/profile — edit display profile fields.
+ * Accepts a partial object: { fullName?, bio?, avatarUrl? }.
+ */
+router.patch('/profile', async (req, res, next) => {
+  try {
+    const parsed = profilePatchSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      const err = new Error(parsed.error.issues[0]?.message ?? 'Invalid body');
+      err.status = 400;
+      return next(err);
+    }
+    const user = await updateProfile(req.userId, parsed.data);
+    return res.json({ user });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * POST /me/avatar — upload a profile picture (raw image body, e.g. image/jpeg).
+ * Stores the bytes in Cloud Storage and saves the public URL on the user doc.
+ */
+router.post(
+  '/avatar',
+  raw({ type: 'image/*', limit: '3mb' }),
+  async (req, res, next) => {
+    try {
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        const err = new Error('Send the image file as the raw request body (image/jpeg, image/png, …)');
+        err.status = 400;
+        return next(err);
+      }
+      const contentType = String(req.headers['content-type'] ?? 'image/jpeg').split(';')[0].trim();
+      const avatarUrl = await uploadImage({
+        folder: `avatars/${req.userId}`,
+        buffer: req.body,
+        contentType,
+      });
+      const user = await updateProfile(req.userId, { avatarUrl });
+      return res.json({ user, avatarUrl });
+    } catch (err) {
+      if (err.status) return next(err);
+      return next(err);
+    }
+  },
+);
 
 export default router;
