@@ -21,7 +21,10 @@ export function createApp() {
   // by rate limiting) reflects the real client, not the proxy.
   app.set('trust proxy', true);
 
-  app.use(helmet());
+  // Helmet with CORP relaxed to cross-origin: the web app embeds backend-served
+  // images (watermarked paid covers, avatars) via <img> — "same-origin" would
+  // block those cross-origin no-cors loads. Scripted reads stay CORS-guarded.
+  app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
   // CORS — open in development, locked to known origins in production.
   const origins = allowedOrigins();
   const allowAll = env.NODE_ENV !== 'production';
