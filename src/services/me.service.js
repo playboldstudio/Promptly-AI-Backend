@@ -76,6 +76,32 @@ export async function getSavedPrompts(userId, { limit = 50, offset = 0 } = {}) {
   return { saved, total: sorted.length };
 }
 
+export async function getPurchasedPrompts(userId, { limit = 50, offset = 0 } = {}) {
+  const all = await queryAll({
+    collection: COLS.promptPurchases,
+    filters: [{ field: 'buyerId', value: userId }, { field: 'status', value: 'completed' }],
+    orderBy: { field: 'createdAt', direction: 'desc' },
+    limit: 10000,
+  });
+  const page = all.rows.slice(offset, offset + limit);
+
+  const promptIds = page.map((r) => r.promptId).filter(Boolean);
+  const prompts = promptIds.length ? await getMany(COLS.prompts, promptIds) : {};
+
+  const purchases = page.map((row) => {
+    const prompt = prompts[row.promptId];
+    return {
+      purchaseId: row.id,
+      purchasedAt: row.createdAt,
+      priceInr: Number(row.priceInr) || 0,
+      // The buyer owns the prompt — always return the full unlocked body.
+      prompt: prompt ? { ...prompt, unlocked: true, savedByMe: false } : null,
+    };
+  });
+
+  return { purchases, total: all.rows.length };
+}
+
 export async function getTransactions(userId, { limit = 50, offset = 0 } = {}) {
   const all = await queryAll({
     collection: COLS.transactions,
@@ -89,6 +115,12 @@ export async function getTransactions(userId, { limit = 50, offset = 0 } = {}) {
 
 export async function setUpiId(userId, upiId) {
   await upsert(COLS.users, userId, { upiId, updatedAt: new Date() });
+  return findByPk(COLS.users, userId);
+}
+
+/** Save the creator's bank-transfer payout details onto their profile. */
+export async function setBankDetails(userId, fields) {
+  await upsert(COLS.users, userId, { ...fields, updatedAt: new Date() });
   return findByPk(COLS.users, userId);
 }
 

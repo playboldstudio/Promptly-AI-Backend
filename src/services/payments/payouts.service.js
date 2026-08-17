@@ -9,24 +9,54 @@ const MIN_WITHDRAWAL_INR = env.MIN_WITHDRAWAL_INR;
 /** Flat Razorpay UPI-transfer fee charged on every withdrawal. */
 const RAZORPAY_FEE_PERCENT = 2;
 
+/** GST levied on the Razorpay fee (18% of the 2%). */
+const RAZORPAY_GST_PERCENT = 18;
+
 function err(status, message) {
   return { error: { status, message } };
 }
 
+/** Money precision: rupees with paise — never more than 2 decimals. */
+function toMoney(value) {
+  return Math.round(value * 100) / 100;
+}
+
+/**
+ * The creator's bank-transfer payout destination is complete only when every
+ * detail AND both KYC document images are on file. Payouts settle via bank
+ * (IMPS/NEFT), so UPI is no longer required.
+ */
+function bankDetailsComplete(user) {
+  return Boolean(
+    user &&
+      user.panNumber &&
+      user.panImageUrl &&
+      user.bankHolderName &&
+      user.bankAccountNumber &&
+      user.bankIfsc &&
+      user.bankBranch &&
+      user.bankAccountImageUrl,
+  );
+}
+
 /**
  * Fee breakdown for a withdrawal. Fees are DEDUCTED from the requested amount:
- * the admin pays `netInr` to the creator's UPI, the platform keeps the rest.
+ * 2% Razorpay UPI fee + 18% GST on that fee + the plan's platform fee. Every
+ * value is kept to 2 decimal places (paise precision) — no whole-rupee rounding.
+ * The admin pays `netInr` to the creator's UPI, the platform keeps the rest.
  * `platformFeePercent` comes from the creator's plan (Pro=5%, Creator=0%).
  */
 function payoutFees(amountInr, platformFeePercent = 0) {
-  const razorpayFeeInr = Math.round((amountInr * RAZORPAY_FEE_PERCENT) / 100);
-  const platformFeeInr = Math.round((amountInr * (platformFeePercent || 0)) / 100);
-  const feeInr = razorpayFeeInr + platformFeeInr;
+  const razorpayFeeInr = toMoney((amountInr * RAZORPAY_FEE_PERCENT) / 100);
+  const gstInr = toMoney((razorpayFeeInr * RAZORPAY_GST_PERCENT) / 100);
+  const platformFeeInr = toMoney((amountInr * (platformFeePercent || 0)) / 100);
+  const feeInr = toMoney(razorpayFeeInr + gstInr + platformFeeInr);
   return {
     razorpayFeeInr,
+    gstInr,
     platformFeeInr,
     feeInr,
-    netInr: amountInr - feeInr,
+    netInr: toMoney(amountInr - feeInr),
   };
 }
 
@@ -56,8 +86,10 @@ export async function withdrawableBalanceFor(userId) {
 
 /**
  * Withdrawal eligibility — the authoritative rules the app should surface.
- * A creator can withdraw when they hold an active Pro/Creator plan, have a
- * saved UPI destination, and their sales earnings meet the minimum.
+ * A creator can withdraw when they hold an active Pro/Creator plan, have their
+ * bank-transfer details + KYC documents on file, and their sales earnings meet
+ * the minimum. `hasUpi` is still returned for client compatibility but no
+ * longer gates withdrawals.
  */
 export async function withdrawalEligibility(userId) {
   const user = await findByPk(COLS.users, userId);
@@ -66,13 +98,14 @@ export async function withdrawalEligibility(userId) {
   const platformFeePercent = sub?.plan?.platformFeePercent ?? 0;
   const withdrawable = await withdrawableBalanceFor(userId);
 
+  const hasBankDetails = bankDetailsComplete(user);
   const hasUpi = Boolean(user?.upiId);
   const hasPaidPlan = planId === 'pro' || planId === 'creator';
   const meetsMinimum = withdrawable >= MIN_WITHDRAWAL_INR;
 
   const blockers = [];
   if (!hasPaidPlan) blockers.push('Upgrade to Pro or Creator to withdraw');
-  if (!hasUpi) blockers.push('Add your UPI ID on your profile before withdrawing');
+  if (!hasBankDetails) blockers.push('Add your bank details (PAN + account) on your profile before withdrawing');
   if (!meetsMinimum) blockers.push(`Earnings below the ₹${MIN_WITHDRAWAL_INR} withdrawal minimum`);
 
   const fees = payoutFees(withdrawable, platformFeePercent);
@@ -82,13 +115,18 @@ export async function withdrawalEligibility(userId) {
     minWithdrawalInr: MIN_WITHDRAWAL_INR,
     eligible: blockers.length === 0,
     blockers,
+    hasBankDetails,
     hasUpi,
     hasPaidPlan,
     meetsMinimum,
     currency: 'INR',
     razorpayFeePercent: RAZORPAY_FEE_PERCENT,
+    razorpayGstPercent: RAZORPAY_GST_PERCENT,
     platformFeePercent,
     estimatedFeeInr: fees.feeInr,
+    estimatedRazorpayFeeInr: fees.razorpayFeeInr,
+    estimatedGstInr: fees.gstInr,
+    estimatedPlatformFeeInr: fees.platformFeeInr,
     estimatedNetInr: fees.netInr,
   };
 }
@@ -114,9 +152,9 @@ export async function requestPayout({ userId, amountInr }) {
   // Fee breakdown: 2% Razorpay + the plan's platform fee, deducted from payout.
   const fees = payoutFees(amountInr, sub?.plan?.platformFeePercent ?? 0);
 
-  // GATE 2 — the creator needs a saved UPI payout destination.
-  if (!user?.upiId) {
-    return err(400, 'Add your UPI ID on your profile before withdrawing');
+  // GATE 2 — the creator needs a saved bank-transfer destination + KYC docs.
+  if (!bankDetailsComplete(user)) {
+    return err(400, 'Add your bank details (PAN + account) on your profile before withdrawing');
   }
 
   // GATE 5 — one in-flight withdrawal at a time (idempotency).
@@ -169,10 +207,17 @@ export async function requestPayout({ userId, amountInr }) {
         userId,
         amountInr,
         status: 'pending',
+        // Historical field retained for old rows; new payouts settle by bank.
         upiId: user.upiId ?? null,
+        panNumber: user.panNumber ?? null,
+        bankHolderName: user.bankHolderName ?? null,
+        bankAccountNumber: user.bankAccountNumber ?? null,
+        bankIfsc: user.bankIfsc ?? null,
+        bankBranch: user.bankBranch ?? null,
         razorpayPayoutId: null,
         bankAccountId: null,
         razorpayFeeInr: fees.razorpayFeeInr,
+        gstInr: fees.gstInr,
         platformFeeInr: fees.platformFeeInr,
         feeInr: fees.feeInr,
         netInr: fees.netInr,
@@ -183,7 +228,7 @@ export async function requestPayout({ userId, amountInr }) {
       });
 
       // Reserve the full requested amount: a debit now, "paid" later is pure
-      // bookkeeping. The admin transfers only `netInr` to the creator's UPI.
+      // bookkeeping. The admin transfers only `netInr` to the creator's bank.
       await writeLedger(
         tx,
         {
@@ -192,7 +237,7 @@ export async function requestPayout({ userId, amountInr }) {
           direction: 'debit',
           amountInr,
           refId: ref.id,
-          note: `Withdrawal — ₹${amountInr} minus ₹${fees.feeInr} fees (2% Razorpay${fees.platformFeeInr ? ` + ${sub?.plan?.platformFeePercent ?? 0}% platform` : ''}), ${fees.netInr} to UPI`,
+          note: `Withdrawal — ₹${amountInr} minus ₹${fees.feeInr} fees (2% Razorpay + 18% GST${fees.platformFeeInr ? ` + ${sub?.plan?.platformFeePercent ?? 0}% platform` : ''}), ${fees.netInr} to bank`,
           balanceInr: bal,
         },
       );
@@ -207,7 +252,13 @@ export async function requestPayout({ userId, amountInr }) {
         amountInr: payout.amountInr,
         status: payout.status,
         upiId: payout.upiId,
+        panNumber: payout.panNumber,
+        bankHolderName: payout.bankHolderName,
+        bankAccountNumber: payout.bankAccountNumber,
+        bankIfsc: payout.bankIfsc,
+        bankBranch: payout.bankBranch,
         razorpayFeeInr: payout.razorpayFeeInr,
+        gstInr: payout.gstInr,
         platformFeeInr: payout.platformFeeInr,
         feeInr: payout.feeInr,
         netInr: payout.netInr,
@@ -258,11 +309,29 @@ export async function listPayouts({ status, limit = 50, offset = 0 } = {}) {
     offset: Math.max(offset, 0),
   });
 
-  // Embed the requesting user (id, fullName, email) like the previous SQL join.
+  // Embed the requesting user (id, fullName, email, bank-transfer details)
+  // like the previous SQL join.
   const maybeUsers = await Promise.all(
     rows.map(async (p) => {
       const user = await findByPk(COLS.users, p.userId);
-      return { ...p, user: user ? { id: user.id, fullName: user.fullName, email: user.email } : null };
+      return {
+        ...p,
+        user: user
+          ? {
+              id: user.id,
+              fullName: user.fullName,
+              email: user.email,
+              upiId: user.upiId ?? null,
+              panNumber: user.panNumber ?? null,
+              bankHolderName: user.bankHolderName ?? null,
+              bankAccountNumber: user.bankAccountNumber ?? null,
+              bankIfsc: user.bankIfsc ?? null,
+              bankBranch: user.bankBranch ?? null,
+              panImageUrl: user.panImageUrl ?? null,
+              bankAccountImageUrl: user.bankAccountImageUrl ?? null,
+            }
+          : null,
+      };
     }),
   );
 
