@@ -2,7 +2,7 @@ import { Router, raw } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
 import { isAdminEmail } from '../config/env.js';
-import { getProfile, getMyPrompts, getSavedPrompts, getTransactions, setUpiId, updateProfile } from '../services/me.service.js';
+import { getProfile, getMyPrompts, getSavedPrompts, getPurchasedPrompts, getTransactions, setUpiId, updateProfile } from '../services/me.service.js';
 import { getEarningsSummary, getEarningsByPrompt } from '../services/earnings.service.js';
 import { uploadImage } from '../services/storage.service.js';
 
@@ -59,6 +59,15 @@ router.get('/saved', async (req, res, next) => {
 router.get('/transactions', async (req, res, next) => {
   try {
     const result = await getTransactions(req.userId, paging(req));
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get('/purchases', async (req, res, next) => {
+  try {
+    const result = await getPurchasedPrompts(req.userId, paging(req));
     return res.json(result);
   } catch (err) {
     return next(err);
