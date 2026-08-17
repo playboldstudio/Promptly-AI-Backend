@@ -118,6 +118,12 @@ export async function setUpiId(userId, upiId) {
   return findByPk(COLS.users, userId);
 }
 
+/** Save the creator's bank-transfer payout details onto their profile. */
+export async function setBankDetails(userId, fields) {
+  await upsert(COLS.users, userId, { ...fields, updatedAt: new Date() });
+  return findByPk(COLS.users, userId);
+}
+
 export async function updateProfile(userId, patch) {
   const fields = {};
   if (patch.fullName !== undefined) fields.fullName = patch.fullName;

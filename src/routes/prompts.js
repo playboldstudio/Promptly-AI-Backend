@@ -10,6 +10,7 @@ import {
 } from '../services/prompts.service.js';
 import { optionalAuth, requireAuth } from '../middleware/auth.js';
 import { uploadImage } from '../services/storage.service.js';
+import { watermarkedPromptImage } from '../services/image-watermark.service.js';
 
 const PROMPT_CATEGORIES = [
   'portrait',
@@ -149,6 +150,43 @@ router.get('/prompts/:id', optionalAuth, async (req, res, next) => {
     recordPromptView(prompt.id);
 
     return res.json({ prompt });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * GET /prompts/:id/image — watermark-protected cover for PAID prompts.
+ * Paid covers are re-rendered with a diagonal title watermark and streamed
+ * inline with no-download headers (private cache, nosniff) so a future web
+ * gallery can show them without handing out the clean file. Free prompts
+ * redirect straight to their original public URL.
+ */
+router.get('/prompts/:id/image', async (req, res, next) => {
+  try {
+    const prompt = await getPromptById(req.params.id, null);
+    if (!prompt || !prompt.imageUrl) {
+      const err = new Error('Prompt image not found');
+      err.status = 404;
+      return next(err);
+    }
+    if (!prompt.isPaid) {
+      return res.redirect(301, prompt.imageUrl);
+    }
+
+    const buffer = await watermarkedPromptImage({
+      imageUrl: prompt.imageUrl,
+      label: prompt.title || 'PROMPTLY',
+    });
+
+    res.set({
+      'Content-Type': 'image/webp',
+      'Content-Disposition': 'inline; filename="prompt.webp"',
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'private, max-age=3600',
+      'X-Robots-Tag': 'noindex',
+    });
+    return res.send(buffer);
   } catch (err) {
     return next(err);
   }
