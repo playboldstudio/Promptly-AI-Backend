@@ -1,5 +1,6 @@
 import { COLS, findByPk, queryAll } from '../../db/firestoreRepo.js';
 import { isAdminEmail } from '../../config/env.js';
+import { planById } from './plans.js';
 
 export async function currentActiveSubscriptionWithPlan(userId) {
   const user = await findByPk(COLS.users, userId);
@@ -8,7 +9,7 @@ export async function currentActiveSubscriptionWithPlan(userId) {
   // regardless of any real (test/live) subscription state. This unlocks paid
   // publishing, unlimited posting, 0% platform fee, and paid-prompt access.
   if (user && isAdminEmail(user.email)) {
-    const creatorPlan = await findByPk(COLS.subscriptionPlans, 'creator');
+    const creatorPlan = await planById('creator');
     return {
       id: `admin_creator_${userId}`,
       userId,
@@ -32,6 +33,6 @@ export async function currentActiveSubscriptionWithPlan(userId) {
   });
   const sub = rows[0];
   if (!sub) return null;
-  const plan = await findByPk(COLS.subscriptionPlans, sub.planId);
+  const plan = await planById(sub.planId);
   return { ...sub, plan: plan ?? null };
 }

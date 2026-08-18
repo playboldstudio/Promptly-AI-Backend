@@ -7,6 +7,7 @@ import {
   savePrompt,
   unsavePrompt,
   createPrompt,
+  deletePrompt,
 } from '../services/prompts.service.js';
 import { optionalAuth, requireAuth } from '../middleware/auth.js';
 import { isAdminEmail } from '../config/env.js';
@@ -29,12 +30,13 @@ const router = Router();
 
 const createPromptSchema = z
   .object({
-    title: z.string().trim().min(1).max(140),
-    description: z.string().trim().min(1).max(2000),
+    title: z.string().trim().min(1).max(60),
+    description: z.string().trim().min(1).max(100),
     promptText: z.string().trim().min(1),
     imageUrl: z.string().trim().url().optional().nullable(),
+    images: z.array(z.string().trim().url()).max(10).optional(),
     category: z.enum(PROMPT_CATEGORIES),
-    tags: z.array(z.string().trim().min(1)).max(20).default([]),
+    tags: z.array(z.string().trim().min(1).max(40)).max(20).default([]),
     isPaid: z.boolean().default(false),
     priceInr: z.number().int().positive().optional().nullable(),
   })
@@ -190,6 +192,30 @@ router.get('/prompts/:id/image', optionalAuth, async (req, res, next) => {
       'X-Robots-Tag': 'noindex',
     });
     return res.send(buffer);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * DELETE /prompts/:id — the author deletes their own prompt; admins may delete
+ * any prompt. Purchase/ledger rows are kept (financial audit) — only the
+ * content and its saves are removed.
+ */
+router.delete('/prompts/:id', requireAuth, async (req, res, next) => {
+  try {
+    const result = await deletePrompt({
+      id: req.params.id,
+      userId: req.userId,
+      isAdmin: isAdminEmail(req.user?.email),
+    });
+    if (result.error) {
+      const { status, message } = result.error;
+      const err = new Error(message);
+      err.status = status;
+      return next(err);
+    }
+    return res.json(result);
   } catch (err) {
     return next(err);
   }

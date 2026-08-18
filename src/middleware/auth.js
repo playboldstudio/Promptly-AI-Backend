@@ -36,7 +36,7 @@ async function resolveUser(token) {
 
   if (UUID_RE.test(token)) {
     const user = await findByPk(COLS.users, token);
-    if (!user) {
+    if (!user || user.deleted) {
       const e = new Error('Invalid or unknown auth token');
       e.status = 401;
       throw e;
@@ -53,6 +53,13 @@ async function verifyFirebaseToken(token) {
     const uid = decoded.uid;
 
     const existing = await findByPk(COLS.users, uid);
+    // Deleted accounts stay deleted — reject before the fill-in-if-missing
+    // upsert below could resurrect them.
+    if (existing?.deleted) {
+      const e = new Error('Account deleted — this account is no longer active');
+      e.status = 401;
+      throw e;
+    }
     // Fill-in-if-missing: token claims seed a NEW profile, but never overwrite
     // values the user has since edited (fullName / avatarUrl via PATCH profile).
     const patch = {

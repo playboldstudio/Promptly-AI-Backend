@@ -11,7 +11,7 @@ import {
   markPayoutPaid,
   markPayoutFailed,
 } from '../services/payments/payouts.service.js';
-import { createSubscription } from '../services/payments/subscriptions.service.js';
+import { createSubscription, cancelActiveSubscription } from '../services/payments/subscriptions.service.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 
 const router = Router();
@@ -128,6 +128,26 @@ router.post('/subscriptions', moneyLimiter, requireRazorpayKeys, async (req, res
       return next(err);
     }
     return res.json({ subscription: result });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * DELETE /payments/subscriptions — cancel the signed-in user's active
+ * subscription. Stops renewals at Razorpay; the paid current period stays
+ * active until it expires. Admins get 409 (their access is permanent).
+ */
+router.delete('/subscriptions', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
+  try {
+    const result = await cancelActiveSubscription(req.userId);
+    if (result.error) {
+      const { status, message } = result.error;
+      const err = new Error(message);
+      err.status = status;
+      return next(err);
+    }
+    return res.json(result);
   } catch (err) {
     return next(err);
   }

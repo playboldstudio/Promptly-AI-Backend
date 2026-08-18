@@ -2,7 +2,7 @@ import { Router, raw } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
 import { isAdminEmail } from '../config/env.js';
-import { getProfile, getMyPrompts, getSavedPrompts, getPurchasedPrompts, getTransactions, setUpiId, setBankDetails, updateProfile } from '../services/me.service.js';
+import { getProfile, getMyPrompts, getSavedPrompts, getPurchasedPrompts, getTransactions, setUpiId, setBankDetails, clearBankDetails, deleteAccount, updateProfile } from '../services/me.service.js';
 import { getEarningsSummary, getEarningsByPrompt } from '../services/earnings.service.js';
 import { uploadImage } from '../services/storage.service.js';
 
@@ -141,6 +141,34 @@ router.post('/bank', async (req, res, next) => {
     }
     const user = await setBankDetails(req.userId, parsed.data);
     return res.json({ user });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * DELETE /me/bank — remove the creator's bank-transfer payout details
+ * (PAN + account + KYC images). They can re-add before the next withdrawal.
+ */
+router.delete('/bank', async (req, res, next) => {
+  try {
+    const user = await clearBankDetails(req.userId);
+    return res.json({ user });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * DELETE /me/account — permanently delete the signed-in account. Cancels the
+ * active subscription, removes saved prompts, soft-deletes + redacts the
+ * profile (financial records are kept for audit), and removes the Firebase
+ * Auth account so sign-in stops working.
+ */
+router.delete('/account', async (req, res, next) => {
+  try {
+    const result = await deleteAccount(req.userId);
+    return res.json(result);
   } catch (err) {
     return next(err);
   }
