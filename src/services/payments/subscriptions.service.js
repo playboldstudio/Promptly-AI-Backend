@@ -1,8 +1,10 @@
-import { COLS, findByPk, queryAll, inTxGet, inTxSet, update } from '../../db/firestoreRepo.js';
+import { COLS, queryAll, inTxGet, inTxSet, update } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
 import { razorpay } from '../../lib/razorpay.js';
 import { razorpayPlanIdFor } from '../../config/env.js';
 import { writeLedger } from '../ledger.js';
+import { planById } from './plans.js';
+import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 
 const PERIOD_MONTH_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -11,7 +13,7 @@ function err(status, message) {
 }
 
 export async function createSubscription({ userId, planId, customerDetails }) {
-  const plan = await findByPk(COLS.subscriptionPlans, planId);
+  const plan = await planById(planId);
   if (!plan || !plan.isActive || !plan.priceInr) {
     return err(404, 'Plan not found');
   }
@@ -63,6 +65,52 @@ export async function createSubscription({ userId, planId, customerDetails }) {
   };
 }
 
+/**
+ * Cancel the caller's active subscription: stop renewals at Razorpay and mark
+ * the local row cancelled. The already-paid current period runs to its end —
+ * benefits (Pro/Creator) stay until the period expires. Admins get a 409 —
+ * their Creator access is permanent, there is nothing to cancel.
+ */
+export async function cancelActiveSubscription(userId) {
+  const sub = await currentActiveSubscriptionWithPlan(userId);
+  if (sub?.adminPerk) {
+    return err(409, 'Admins always have Creator access — there is no subscription to cancel');
+  }
+
+  const { rows } = await queryAll({
+    collection: COLS.userSubscriptions,
+    filters: [{ field: 'userId', value: userId }, { field: 'status', value: 'active' }],
+    orderBy: { field: 'createdAt', direction: 'desc' },
+    limit: 1,
+  });
+  const row = rows[0];
+  if (!row) return err(404, 'No active subscription to cancel');
+
+  if (row.razorpaySubId) {
+    try {
+      await razorpay().subscriptions.cancel(row.razorpaySubId, false);
+    } catch (e) {
+      // Already cancelled/expired at Razorpay is fine — just sync locally.
+      if (!/already|cancelled|expired|subscription/i.test(e?.message ?? '')) {
+        return err(502, 'Could not cancel the subscription at Razorpay — try again');
+      }
+    }
+  }
+
+  await update(COLS.userSubscriptions, row.id, {
+    status: 'cancelled',
+    cancelledAt: new Date(),
+    updatedAt: new Date(),
+  });
+
+  return {
+    success: true,
+    subscriptionId: row.razorpaySubId,
+    planId: row.planId,
+    cancelledAt: new Date().toISOString(),
+  };
+}
+
 export async function activateSubscription(sub) {
   const userId = sub.notes?.userId;
   if (!userId) return; // seeded/historical subs without notes — nothing to wire
@@ -74,7 +122,7 @@ export async function activateSubscription(sub) {
   const periodEnd = new Date(sub.current_end * 1000);
 
   await runTransaction(async (tx) => {
-    const plan = await findByPk(COLS.subscriptionPlans, planId);
+    const plan = await planById(planId);
     const docId = `sub_${sub.id}`;
     const existing = await inTxGet(tx, COLS.userSubscriptions, docId);
     // Pre-read the balance BEFORE any write — Firestore transactions cannot read

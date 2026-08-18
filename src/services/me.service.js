@@ -4,8 +4,12 @@ import {
   queryAll,
   getMany,
   upsert,
+  remove,
 } from '../db/firestoreRepo.js';
+import { firebaseAuth } from '../db/firestore.js';
 import { currentActiveSubscriptionWithPlan } from './payments/subscription-utils.js';
+import { cancelActiveSubscription } from './payments/subscriptions.service.js';
+import { isAdminEmail } from '../config/env.js';
 
 export async function getProfile(userId) {
   const [subscription, kyc] = await Promise.all([
@@ -46,7 +50,10 @@ export async function getSavedPrompts(userId, { limit = 50, offset = 0 } = {}) {
   const prompts = promptIds.length ? await getMany(COLS.prompts, promptIds) : {};
 
   // Gate the paid prompt body the same way the prompt feed/detail do:
-  // unlock when free, the viewer is the author, or they have a completed purchase.
+  // unlock when free, the viewer is the author, they have a completed purchase,
+  // or they are a platform admin (full access — no purchase needed).
+  const viewer = await findByPk(COLS.users, userId);
+  const isAdmin = viewer && isAdminEmail(viewer.email);
   const unlockedQuery = await queryAll({
     collection: COLS.promptPurchases,
     filters: [{ field: 'buyerId', value: userId }, { field: 'status', value: 'completed' }],
@@ -58,6 +65,7 @@ export async function getSavedPrompts(userId, { limit = 50, offset = 0 } = {}) {
     const prompt = prompts[row.promptId];
     const json = prompt ? { ...prompt } : {};
     const unlocked =
+      isAdmin ||
       !prompt ||
       !json.isPaid ||
       (json.authorId && json.authorId === userId) ||
@@ -67,6 +75,7 @@ export async function getSavedPrompts(userId, { limit = 50, offset = 0 } = {}) {
       ...row,
       prompt: {
         ...json,
+        images: Array.isArray(json.images) && json.images.length ? json.images : json.imageUrl ? [json.imageUrl] : [],
         savedByMe: true,
         unlocked,
       },
@@ -133,4 +142,81 @@ export async function updateProfile(userId, patch) {
   fields.updatedAt = new Date();
   await upsert(COLS.users, userId, fields);
   return findByPk(COLS.users, userId);
+}
+
+/**
+ * Remove the creator's bank-transfer payout details from their profile.
+ * KYC documents are wiped too; they can re-add them before the next withdrawal.
+ */
+export async function clearBankDetails(userId) {
+  await upsert(COLS.users, userId, {
+    panNumber: null,
+    bankHolderName: null,
+    bankAccountNumber: null,
+    bankIfsc: null,
+    bankBranch: null,
+    panImageUrl: null,
+    bankAccountImageUrl: null,
+    updatedAt: new Date(),
+  });
+  return findByPk(COLS.users, userId);
+}
+
+/**
+ * Delete the signed-in user's account. Financial rows (purchases, ledger,
+ * payouts) keep their author/buyer references for the audit trail, so the
+ * profile is soft-deleted and PII redacted; the Firebase Auth account is also
+ * removed so the user can no longer sign in. Best-effort: cancels any active
+ * subscription first and cleans up saved prompts.
+ */
+export async function deleteAccount(userId) {
+  // Stop the active subscription (if any) so renewals don't keep billing.
+  try {
+    await cancelActiveSubscription(userId);
+  } catch {
+    // non-fatal — cancellation is best-effort on account removal
+  }
+
+  // Clean up the user's saved prompts.
+  try {
+    const saved = await queryAll({
+      collection: COLS.savedPrompts,
+      filters: [{ field: 'userId', value: userId }],
+      limit: 10000,
+    });
+    await Promise.all(saved.rows.map((s) => remove(COLS.savedPrompts, s.id)));
+  } catch {
+    // non-fatal
+  }
+
+  // Soft-delete the profile — financial references (userId/authorId on
+  // purchases, ledger, payouts) must keep resolving for the audit trail.
+  await upsert(COLS.users, userId, {
+    deleted: true,
+    deletedAt: new Date(),
+    email: null,
+    fullName: 'Deleted User',
+    bio: null,
+    avatarUrl: null,
+    upiId: null,
+    panNumber: null,
+    bankHolderName: null,
+    bankAccountNumber: null,
+    bankIfsc: null,
+    bankBranch: null,
+    panImageUrl: null,
+    bankAccountImageUrl: null,
+    authProviderId: null,
+    updatedAt: new Date(),
+  });
+
+  // Remove the Firebase Auth account so sign-in fails for this user. Wrapped —
+  // the soft-delete above is the source of truth; auth removal is best-effort.
+  try {
+    await firebaseAuth.deleteUser(userId);
+  } catch {
+    // non-fatal
+  }
+
+  return { success: true };
 }

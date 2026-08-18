@@ -11,6 +11,7 @@ const PUBLIC_PROMPT_ATTRS = [
   'title',
   'description',
   'imageUrl',
+  'images',
   'category',
   'tags',
   'isPaid',
@@ -21,6 +22,15 @@ const PUBLIC_PROMPT_ATTRS = [
 ];
 
 const AUTHOR_ATTRS = ['id', 'fullName', 'avatarUrl', 'role'];
+
+/** Normalize a prompt's image list — legacy docs only have imageUrl (cover). */
+function normalizeImages(json) {
+  return Array.isArray(json.images) && json.images.length
+    ? json.images
+    : json.imageUrl
+      ? [json.imageUrl]
+      : [];
+}
 
 function serializeAuthor(author) {
   return author
@@ -36,6 +46,7 @@ function serializeAuthor(author) {
 function toPublicPrompt(json) {
   const out = {};
   for (const k of PUBLIC_PROMPT_ATTRS) out[k] = json[k];
+  out.images = normalizeImages(json);
   return out;
 }
 
@@ -136,6 +147,7 @@ export async function getPromptById(id, viewerId) {
   return {
     ...json,
     ...derivePromptFlags(prompt),
+    images: normalizeImages(json),
     author: serializeAuthor(author),
     savedByMe,
     unlocked,
@@ -180,12 +192,20 @@ export async function createPrompt({ userId, input }) {
 
   const id = crypto.randomUUID();
   const now = new Date();
+
+  // Multiple image support — `images` is the gallery, `imageUrl` the cover
+  // (first image, or the caller's explicit cover). Legacy-safe: a bare
+  // imageUrl is stored as a single-element gallery.
+  const images = (input.images ?? []).map((s) => s.trim()).filter(Boolean);
+  const cover = input.imageUrl ?? images[0] ?? null;
+
   await create(COLS.prompts, id, {
     authorId: userId,
     title: input.title,
     description: input.description,
     promptText: input.promptText,
-    imageUrl: input.imageUrl ?? null,
+    imageUrl: cover,
+    images: images.length ? images : cover ? [cover] : [],
     category: input.category,
     tags: input.tags ?? [],
     isPaid: input.isPaid,
@@ -206,6 +226,38 @@ export async function createPrompt({ userId, input }) {
       savedByMe: false,
     },
   };
+}
+
+/**
+ * Delete a prompt. The author deletes their own; admins may delete any prompt.
+ * Purchase + ledger rows are kept for the financial audit trail — only the
+ * content itself and its saves are removed.
+ */
+export async function deletePrompt({ id, userId, isAdmin }) {
+  const prompt = await findByPk(COLS.prompts, id);
+  if (!prompt || prompt.status !== 'published') {
+    return { error: { status: 404, message: 'Prompt not found' } };
+  }
+  if (!isAdmin && prompt.authorId !== userId) {
+    return { error: { status: 403, message: 'Only the author or an admin can delete this prompt' } };
+  }
+
+  await remove(COLS.prompts, id);
+
+  // Clean up the saves pointing at this prompt (fire-and-forget is safe here —
+  // a failed save row is harmless, but the prompt itself is gone).
+  try {
+    const saved = await queryAll({
+      collection: COLS.savedPrompts,
+      filters: [{ field: 'promptId', value: id }],
+      limit: 10000,
+    });
+    await Promise.all(saved.rows.map((s) => remove(COLS.savedPrompts, s.id)));
+  } catch {
+    // non-fatal
+  }
+
+  return { success: true, id };
 }
 
 /**
