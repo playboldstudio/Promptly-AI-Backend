@@ -9,6 +9,7 @@ import {
   createPrompt,
 } from '../services/prompts.service.js';
 import { optionalAuth, requireAuth } from '../middleware/auth.js';
+import { isAdminEmail } from '../config/env.js';
 import { uploadImage } from '../services/storage.service.js';
 import { watermarkedPromptImage } from '../services/image-watermark.service.js';
 
@@ -160,17 +161,19 @@ router.get('/prompts/:id', optionalAuth, async (req, res, next) => {
  * Paid covers are re-rendered with a diagonal title watermark and streamed
  * inline with no-download headers (private cache, nosniff) so a future web
  * gallery can show them without handing out the clean file. Free prompts
- * redirect straight to their original public URL.
+ * redirect straight to their original public URL, and so do admins (they have
+ * full access — no watermark).
  */
-router.get('/prompts/:id/image', async (req, res, next) => {
+router.get('/prompts/:id/image', optionalAuth, async (req, res, next) => {
   try {
-    const prompt = await getPromptById(req.params.id, null);
+    const prompt = await getPromptById(req.params.id, req.userId);
     if (!prompt || !prompt.imageUrl) {
       const err = new Error('Prompt image not found');
       err.status = 404;
       return next(err);
     }
-    if (!prompt.isPaid) {
+    const isAdmin = Boolean(req.user && isAdminEmail(req.user.email));
+    if (!prompt.isPaid || isAdmin) {
       return res.redirect(301, prompt.imageUrl);
     }
 

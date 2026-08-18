@@ -2,6 +2,7 @@ import { COLS, findByPk, inTxGet, inTxSet } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
 import { razorpay, verifyPaymentSignature } from '../../lib/razorpay.js';
 import { writeLedger } from '../ledger.js';
+import { isAdminEmail } from '../../config/env.js';
 import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 
 /** Money precision: rupees with paise — never more than 2 decimals. */
@@ -25,6 +26,12 @@ export async function createCheckoutOrder({ buyerId, promptId }) {
   }
   if (!prompt.isPaid || !prompt.priceInr) {
     return { error: { status: 400, message: 'This prompt is free — nothing to pay' } };
+  }
+
+  // Admins have full access to every prompt — they never pay.
+  const buyer = await findByPk(COLS.users, buyerId);
+  if (buyer && isAdminEmail(buyer.email)) {
+    return { error: { status: 409, message: 'You have full admin access — this prompt is already unlocked' } };
   }
 
   // One unlock per buyer per prompt — reject if already purchased.

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { COLS, findByPk, queryAll, remove, upsert, create, getMany, increment } from '../db/firestoreRepo.js';
 import { derivePromptFlags } from './prompt-metrics.js';
+import { isAdminEmail } from '../config/env.js';
 import { currentActiveSubscriptionWithPlan } from './payments/subscription-utils.js';
 
 // promptText is the paid asset and is only revealed to owners/unlockers
@@ -113,17 +114,18 @@ export async function getPromptById(id, viewerId) {
 
   const author = prompt.authorId ? await findByPk(COLS.users, prompt.authorId) : null;
 
-  // Free prompts are always unlocked; paid ones unlock for the owner or a buyer.
+  // Free prompts are always unlocked; paid ones unlock for the owner, a buyer,
+  // or a platform admin (full access without paying).
   let unlocked = !prompt.isPaid || Boolean(viewerId && prompt.authorId === viewerId);
 
   let savedByMe = false;
   if (viewerId) {
-    const [purchase, saved] = await Promise.all([
-      unlocked
-        ? null
-        : findByPk(COLS.promptPurchases, `${viewerId}_${id}`),
+    const [viewer, purchase, saved] = await Promise.all([
+      findByPk(COLS.users, viewerId),
+      unlocked ? null : findByPk(COLS.promptPurchases, `${viewerId}_${id}`),
       findByPk(COLS.savedPrompts, `${viewerId}_${id}`),
     ]);
+    if (viewer && isAdminEmail(viewer.email)) unlocked = true;
     if (purchase && purchase.status === 'completed') unlocked = true;
     savedByMe = Boolean(saved);
   }
