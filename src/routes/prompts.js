@@ -47,8 +47,8 @@ const createPromptSchema = z
 
 /**
  * POST /prompts — creator publish. Authenticated; authorId is the caller.
- * Gates: daily post limit from the plan (Free=3/day, Pro/Creator unlimited)
- * and paid prompts require the Pro or Creator plan (canPostPaid).
+ * Unlimited free posts for every user; paid prompts require the Pro or
+ * Creator plan (canPostPaid).
  */
 router.post('/prompts', requireAuth, async (req, res, next) => {
   try {

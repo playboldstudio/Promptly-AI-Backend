@@ -155,9 +155,9 @@ export async function getPromptById(id, viewerId) {
 }
 
 /**
- * Publish a new prompt as the signed-in creator (authorId = caller). Gates:
- * daily post limit from the current plan (Free = 3/day; Pro/Creator unlimited)
- * and paid prompts require the Pro or Creator plan.
+ * Publish a new prompt as the signed-in creator (authorId = caller). Everyone
+ * may post unlimited free prompts; only PAID prompts are gated — they require
+ * the Pro or Creator plan (canPostPaid).
  */
 export async function createPrompt({ userId, input }) {
   const user = await findByPk(COLS.users, userId);
@@ -165,25 +165,6 @@ export async function createPrompt({ userId, input }) {
 
   const sub = await currentActiveSubscriptionWithPlan(userId);
   const plan = sub?.plan ?? null;
-
-  // GATE — daily post limit from the current plan. null = unlimited (Pro/Creator);
-  // no active sub = Free tier (3/day from the plan seed).
-  const dailyLimit = plan ? plan.dailyPostLimit : 3;
-  if (dailyLimit) {
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    const { rows } = await queryAll({
-      collection: COLS.prompts,
-      filters: [{ field: 'authorId', value: userId }],
-      limit: 10000,
-    });
-    const postedToday = rows.filter((r) => new Date(r.createdAt) >= startOfDay).length;
-    if (postedToday >= dailyLimit) {
-      return {
-        error: { status: 429, message: `Daily publish limit reached (${dailyLimit}/day) — upgrade to Pro/Creator for unlimited` },
-      };
-    }
-  }
 
   // GATE — paid prompts need a paid plan with canPostPaid (Pro or Creator).
   if (input.isPaid && !plan?.canPostPaid) {
