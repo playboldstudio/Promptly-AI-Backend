@@ -6,6 +6,7 @@ import morgan from 'morgan';
 import healthRouter from './routes/health.js';
 import authRouter from './routes/auth.js';
 import promptsRouter from './routes/prompts.js';
+import adminPromptsRouter from './routes/admin-prompts.js';
 import meRouter from './routes/me.js';
 import paymentsRouter from './routes/payments.js';
 import webhooksRouter from './routes/webhooks.js';
@@ -47,6 +48,7 @@ export function createApp() {
   app.use(healthRouter);
   app.use(authRouter);
   app.use(promptsRouter);
+  app.use(adminPromptsRouter);
   app.use('/me', meRouter);
   app.use('/payments', paymentsRouter);
 

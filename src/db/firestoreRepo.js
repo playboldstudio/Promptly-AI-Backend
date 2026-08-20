@@ -163,6 +163,30 @@ export async function queryAll({
   return { rows, count: rows.length };
 }
 
+/**
+ * Create many docs with deterministic ids in batched commits (Firestore caps a
+ * single batch at 500 writes). Returns the created doc ids. Chunks the input so
+ * bulk imports of 1,000+ prompts don't fan out into thousands of writes.
+ */
+export async function batchCreate(collection, entries) {
+  const BATCH_LIMIT = 500;
+  const created = [];
+  const refs = entries.map(({ id, data }) => ({
+    ref: db.collection(collection).doc(id),
+    data,
+  }));
+
+  for (let i = 0; i < refs.length; i += BATCH_LIMIT) {
+    const chunk = refs.slice(i, i + BATCH_LIMIT);
+    const batch = db.batch();
+    for (const { ref, data } of chunk) batch.create(ref, toWritePayload(data));
+    await batch.commit();
+    created.push(...chunk.map((c) => c.ref.id));
+  }
+
+  return created;
+}
+
 /** Load many docs by ids in parallel. Returns objects keyed by id. */
 export async function getMany(collection, ids) {
   const out = {};
