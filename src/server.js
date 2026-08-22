@@ -8,6 +8,9 @@ const HOST = '0.0.0.0';
 
 const server = app.listen(env.PORT, HOST, () => {
   console.log(`Promptly AI backend listening on http://${HOST}:${env.PORT} (${env.NODE_ENV})`);
+  if (env.DEV_AUTH_PASSWORD) {
+    console.warn('WARNING: DEV_AUTH_PASSWORD is set — password-based dev authentication is ENABLED. Never enable in production.');
+  }
 });
 
 // Crash-fast on unhandled errors instead of leaving the instance half-alive.

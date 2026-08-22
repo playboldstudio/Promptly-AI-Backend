@@ -1,5 +1,6 @@
+import crypto from 'node:crypto';
 import { firebaseAuth } from '../db/firestore.js';
-import { COLS, findByPk, upsert } from '../db/firestoreRepo.js';
+import { COLS, findByPk, queryAll, upsert } from '../db/firestoreRepo.js';
 import { env } from '../config/env.js';
 
 /**
@@ -23,11 +24,56 @@ function unauthorized(next, message) {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * DEV-ONLY backdoor — active exclusively when DEV_AUTH_PASSWORD is configured.
+ * Token shape: "Bearer <password>:<email>". Resolves the user by email (creating
+ * a profile only if none exists). NEVER set DEV_AUTH_PASSWORD on production —
+ * when the var is absent this path is inert and Firebase auth applies.
+ */
+async function devUserByEmail(email) {
+  if (!email) {
+    const e = new Error('Dev auth requires an email — send Bearer <password>:<email>');
+    e.status = 401;
+    throw e;
+  }
+  const { rows } = await queryAll({
+    collection: COLS.users,
+    filters: [{ field: 'email', op: '==', value: email }],
+    limit: 1,
+  });
+  let user = rows[0];
+  if (!user) {
+    const uid = crypto.createHash('sha256').update(`dev-auth:${email}`).digest('hex').slice(0, 28);
+    await upsert(COLS.users, uid, {
+      authProviderId: uid,
+      email,
+      fullName: email.split('@')[0],
+      avatarUrl: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    user = await findByPk(COLS.users, uid);
+  }
+  if (!user || user.deleted) {
+    const e = new Error('Invalid or unknown auth token');
+    e.status = 401;
+    throw e;
+  }
+  return { user, userId: user.id };
+}
+
 async function resolveUser(token) {
   if (!token) {
     const e = new Error('Authentication required — send Authorization: Bearer <token>');
     e.status = 401;
     throw e;
+  }
+
+  if (env.DEV_AUTH_PASSWORD) {
+    const sep = token.indexOf(':');
+    if (sep > 0 && token.slice(0, sep) === env.DEV_AUTH_PASSWORD) {
+      return devUserByEmail(token.slice(sep + 1).trim().toLowerCase());
+    }
   }
 
   if (env.NODE_ENV === 'production') {

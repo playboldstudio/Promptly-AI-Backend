@@ -28,6 +28,8 @@ const envSchema = z.object({
 
   ADMIN_EMAILS: z.string().optional().default(''),
 
+  DEV_AUTH_PASSWORD: z.string().optional().default(''),
+
   MIN_WITHDRAWAL_INR: z.coerce.number().int().positive().default(60),
 });
 
