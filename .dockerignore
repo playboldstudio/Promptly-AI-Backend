@@ -25,3 +25,7 @@ gcp-key.json
 .kotlin
 .gradle
 build/
+
+# Service-account keys (exact names the wildcard patterns miss)
+firebase-sa-key.json
+*-sa-key.json
