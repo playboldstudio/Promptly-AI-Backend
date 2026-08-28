@@ -36,6 +36,7 @@ gcloud iam workload-identity-pools providers create-oidc "github" \
   --location "global" \
   --workload-identity-pool "github-actions" \
   --display-name "GitHub" \
+  --issuer-uri "https://token.actions.githubusercontent.com" \
   --attribute-mapping "google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
   --attribute-condition "assertion.repository_owner == '$GITHUB_ORG' && attribute.repository == '$GITHUB_ORG/$REPO'"
 ```
@@ -73,25 +74,15 @@ gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
   --role "roles/iam.workloadIdentityUser" \
   --member "principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/attribute.repository/$GITHUB_ORG/$REPO"
 
-# Deploy Cloud Run services
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member "serviceAccount:$SA_EMAIL" \
-  --role "roles/run.admin"
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member "serviceAccount:$SA_EMAIL" \
-  --role "roles/iam.serviceAccountUser"
-# The deploy runs as the service's own runtime SA; grant it the above SA user on itself
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member "serviceAccount:$SA_EMAIL" \
-  --role "roles/iam.serviceAccountUser"
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member "serviceAccount:$SA_EMAIL" \
-  --role "roles/artifactregistry.admin"
-
-# Create Firestore composite indexes (used by scripts/deploy-firestore-indexes.mjs)
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member "serviceAccount:$SA_EMAIL" \
-  --role "roles/datastore.owner"
+# Deploy Cloud Run services + Firestore indexes.
+# (Add --condition=None to each if the project IAM policy already has conditional
+# bindings — gcloud refuses to add an unconditional binding otherwise.)
+for ROLE in roles/run.admin roles/iam.serviceAccountUser roles/artifactregistry.admin roles/datastore.owner; do
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member "serviceAccount:$SA_EMAIL" \
+    --role "$ROLE" \
+    --condition=None   # or drop this if the policy has no other conditions
+done
 ```
 
 > `PROJECT_NUMBER` — get it with `gcloud projects describe $PROJECT_ID --format "value(projectNumber)"`.
@@ -124,7 +115,8 @@ RUNTIME_SA="promptly-ai-sa@$PROJECT_ID.iam.gserviceaccount.com"
 gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
   --project "$PROJECT_ID" \
   --role "roles/iam.serviceAccountUser" \
-  --member "serviceAccount:cloud-run-deploy@$PROJECT_ID.iam.gserviceaccount.com"
+  --member "serviceAccount:cloud-run-deploy@$PROJECT_ID.iam.gserviceaccount.com" \
+  --condition=None   # needed if the SA policy has other conditions
 ```
 
 ## 5. Disable the old Cloud Run git-integration (avoids double deploys)
