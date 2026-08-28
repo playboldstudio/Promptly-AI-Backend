@@ -1,4 +1,4 @@
-import { COLS, findByPk, queryAll, inTxGet, inTxAdd, inTxSet, inTxQueryAll } from '../../db/firestoreRepo.js';
+import { COLS, findByPk, getMany, queryAll, inTxGet, inTxAdd, inTxSet, inTxQueryAll } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
 import { env } from '../../config/env.js';
 import { writeLedger } from '../ledger.js';
@@ -310,32 +310,33 @@ export async function listPayouts({ status, limit = 50, offset = 0 } = {}) {
   });
 
   // Embed the requesting user (id, fullName, email, bank-transfer details)
-  // like the previous SQL join.
-  const maybeUsers = await Promise.all(
-    rows.map(async (p) => {
-      const user = await findByPk(COLS.users, p.userId);
-      return {
-        ...p,
-        user: user
-          ? {
-              id: user.id,
-              fullName: user.fullName,
-              email: user.email,
-              upiId: user.upiId ?? null,
-              panNumber: user.panNumber ?? null,
-              bankHolderName: user.bankHolderName ?? null,
-              bankAccountNumber: user.bankAccountNumber ?? null,
-              bankIfsc: user.bankIfsc ?? null,
-              bankBranch: user.bankBranch ?? null,
-              panImageUrl: user.panImageUrl ?? null,
-              bankAccountImageUrl: user.bankAccountImageUrl ?? null,
-            }
-          : null,
-      };
-    }),
-  );
+  // like the previous SQL join. One batched read, not N sequential lookups.
+  const userIds = [...new Set(rows.map((p) => p.userId).filter(Boolean))];
+  const users = userIds.length ? await getMany(COLS.users, userIds) : {};
 
-  return { payouts: maybeUsers, total: rows.length };
+  const payouts = rows.map((p) => {
+    const user = users[p.userId];
+    return {
+      ...p,
+      user: user
+        ? {
+            id: user.id,
+            fullName: user.fullName,
+            email: user.email,
+            upiId: user.upiId ?? null,
+            panNumber: user.panNumber ?? null,
+            bankHolderName: user.bankHolderName ?? null,
+            bankAccountNumber: user.bankAccountNumber ?? null,
+            bankIfsc: user.bankIfsc ?? null,
+            bankBranch: user.bankBranch ?? null,
+            panImageUrl: user.panImageUrl ?? null,
+            bankAccountImageUrl: user.bankAccountImageUrl ?? null,
+          }
+        : null,
+    };
+  });
+
+  return { payouts, total: rows.length };
 }
 
 /**

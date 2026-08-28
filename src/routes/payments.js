@@ -13,6 +13,8 @@ import {
 } from '../services/payments/payouts.service.js';
 import { createSubscription, cancelActiveSubscription } from '../services/payments/subscriptions.service.js';
 import { rateLimit } from '../middleware/rateLimit.js';
+import { parsePaging } from '../utils/paging.js';
+import { httpError } from '../utils/http-error.js';
 
 const router = Router();
 
@@ -60,18 +62,9 @@ const verifySchema = z.object({
 router.post('/checkout/order', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
   try {
     const parsed = orderSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      const err = new Error('Invalid body — expected { promptId: uuid }');
-      err.status = 400;
-      return next(err);
-    }
+    if (!parsed.success) return next(httpError(400, 'Invalid body — expected { promptId: uuid }'));
     const result = await createCheckoutOrder({ buyerId: req.userId, promptId: parsed.data.promptId });
-    if (result.error) {
-      const { status, message } = result.error;
-      const err = new Error(message);
-      err.status = status;
-      return next(err);
-    }
+    if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json({ order: result });
   } catch (err) {
     return next(err);
@@ -85,18 +78,9 @@ router.post('/checkout/order', moneyLimiter, requireRazorpayKeys, async (req, re
 router.post('/checkout/verify', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
   try {
     const parsed = verifySchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      const err = new Error('Invalid body — expected { promptId, orderId, paymentId, signature }');
-      err.status = 400;
-      return next(err);
-    }
+    if (!parsed.success) return next(httpError(400, 'Invalid body — expected { promptId, orderId, paymentId, signature }'));
     const result = await verifyAndUnlock({ buyerId: req.userId, ...parsed.data });
-    if (result.error) {
-      const { status, message } = result.error;
-      const err = new Error(message);
-      err.status = status;
-      return next(err);
-    }
+    if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json({ success: true, unlocked: true, promptId: result.promptId });
   } catch (err) {
     return next(err);
@@ -112,21 +96,12 @@ const subscriptionSchema = z.object({ planId: z.enum(['pro', 'creator']) });
 router.post('/subscriptions', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
   try {
     const parsed = subscriptionSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      const err = new Error('Invalid body — expected { planId: "pro" | "creator" }');
-      err.status = 400;
-      return next(err);
-    }
+    if (!parsed.success) return next(httpError(400, 'Invalid body — expected { planId: "pro" | "creator" }'));
     const result = await createSubscription({
       userId: req.userId,
       planId: parsed.data.planId,
     });
-    if (result.error) {
-      const { status, message } = result.error;
-      const err = new Error(message);
-      err.status = status;
-      return next(err);
-    }
+    if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json({ subscription: result });
   } catch (err) {
     return next(err);
@@ -141,12 +116,7 @@ router.post('/subscriptions', moneyLimiter, requireRazorpayKeys, async (req, res
 router.delete('/subscriptions', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
   try {
     const result = await cancelActiveSubscription(req.userId);
-    if (result.error) {
-      const { status, message } = result.error;
-      const err = new Error(message);
-      err.status = status;
-      return next(err);
-    }
+    if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json(result);
   } catch (err) {
     return next(err);
@@ -174,9 +144,7 @@ router.get('/payouts/eligibility', async (req, res, next) => {
  */
 router.get('/payouts', async (req, res, next) => {
   try {
-    const limit = Math.min(Number(req.query.limit) || 50, 100);
-    const offset = Math.max(Number(req.query.offset) || 0, 0);
-    const result = await listUserPayouts(req.userId, { limit, offset });
+    const result = await listUserPayouts(req.userId, parsePaging(req.query));
     return res.json(result);
   } catch (err) {
     return next(err);
@@ -190,18 +158,9 @@ router.get('/payouts', async (req, res, next) => {
 router.post('/payouts', moneyLimiter, async (req, res, next) => {
   try {
     const parsed = payoutSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      const err = new Error('Invalid body — expected { amountInr: number }');
-      err.status = 400;
-      return next(err);
-    }
+    if (!parsed.success) return next(httpError(400, 'Invalid body — expected { amountInr: number }'));
     const result = await requestPayout({ userId: req.userId, amountInr: parsed.data.amountInr });
-    if (result.error) {
-      const { status, message } = result.error;
-      const err = new Error(message);
-      err.status = status;
-      return next(err);
-    }
+    if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.status(201).json(result);
   } catch (err) {
     return next(err);
@@ -220,7 +179,7 @@ router.post('/payouts', moneyLimiter, async (req, res, next) => {
 router.get('/admin/payouts', requireAdmin, async (req, res, next) => {
   try {
     const { status } = req.query;
-    const result = await listPayouts({ status, limit: req.query.limit, offset: req.query.offset });
+    const result = await listPayouts({ status, ...parsePaging(req.query) });
     return res.json(result);
   } catch (err) {
     return next(err);
@@ -234,12 +193,7 @@ router.get('/admin/payouts', requireAdmin, async (req, res, next) => {
 router.post('/admin/payouts/:id/mark-paid', moneyLimiter, requireAdmin, async (req, res, next) => {
   try {
     const result = await markPayoutPaid({ payoutId: req.params.id });
-    if (result.error) {
-      const { status, message } = result.error;
-      const err = new Error(message);
-      err.status = status;
-      return next(err);
-    }
+    if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json(result);
   } catch (err) {
     return next(err);
@@ -256,12 +210,7 @@ router.post('/admin/payouts/:id/mark-failed', moneyLimiter, requireAdmin, async 
       payoutId: req.params.id,
       reason: req.body?.reason,
     });
-    if (result.error) {
-      const { status, message } = result.error;
-      const err = new Error(message);
-      err.status = status;
-      return next(err);
-    }
+    if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json(result);
   } catch (err) {
     return next(err);

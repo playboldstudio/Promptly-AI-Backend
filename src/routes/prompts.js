@@ -13,18 +13,10 @@ import { optionalAuth, requireAuth } from '../middleware/auth.js';
 import { isAdminEmail } from '../config/env.js';
 import { uploadImage } from '../services/storage.service.js';
 import { watermarkedPromptImage } from '../services/image-watermark.service.js';
-
-const PROMPT_CATEGORIES = [
-  'portrait',
-  'fashion',
-  'cinematic',
-  'product',
-  'travel',
-  'creative',
-  'social',
-  'photography',
-  'other',
-];
+import { moderateImage } from '../services/image-moderation.service.js';
+import { parsePaging } from '../utils/paging.js';
+import { httpError } from '../utils/http-error.js';
+import { PROMPT_CATEGORIES } from '../utils/prompt-import.js';
 
 const router = Router();
 
@@ -53,18 +45,9 @@ const createPromptSchema = z
 router.post('/prompts', requireAuth, async (req, res, next) => {
   try {
     const parsed = createPromptSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      const err = new Error(parsed.error.issues[0]?.message ?? 'Invalid prompt body');
-      err.status = 400;
-      return next(err);
-    }
+    if (!parsed.success) return next(httpError(400, parsed.error.issues[0]?.message ?? 'Invalid prompt body'));
     const result = await createPrompt({ userId: req.userId, input: parsed.data });
-    if (result.error) {
-      const { status, message } = result.error;
-      const err = new Error(message);
-      err.status = status;
-      return next(err);
-    }
+    if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.status(201).json(result);
   } catch (err) {
     return next(err);
@@ -82,11 +65,17 @@ router.post(
   async (req, res, next) => {
     try {
       if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
-        const err = new Error('Send the image file as the raw request body (image/jpeg, image/png, …)');
-        err.status = 400;
-        return next(err);
+        return next(httpError(400, 'Send the image file as the raw request body (image/jpeg, image/png, …)'));
       }
       const contentType = String(req.headers['content-type'] ?? 'image/jpeg').split(';')[0].trim();
+
+      // Server-side NSFW moderation — reject adult/racy images for non-admins.
+      // Admins are exempt (admin bulk import uses a separate route).
+      const mod = await moderateImage(req.body, contentType);
+      if (!mod.safe) {
+        return next(httpError(422, mod.reason));
+      }
+
       const imageUrl = await uploadImage({
         folder: `prompts/${req.userId}`,
         buffer: req.body,
@@ -108,18 +97,13 @@ router.post(
 router.get('/prompts', optionalAuth, async (req, res, next) => {
   try {
     const { category, paid, sort, q } = req.query;
-    const limit = Math.min(Number(req.query.limit) || 50, 100);
-    const offset = Math.max(Number(req.query.offset) || 0, 0);
+    const { limit, offset } = parsePaging(req.query);
 
     if (category && !PROMPT_CATEGORIES.includes(category)) {
-      const err = new Error(`Invalid category "${category}"`);
-      err.status = 400;
-      return next(err);
+      return next(httpError(400, `Invalid category "${category}"`));
     }
     if (paid && !['free', 'paid'].includes(paid)) {
-      const err = new Error('paid must be "free" or "paid"');
-      err.status = 400;
-      return next(err);
+      return next(httpError(400, 'paid must be "free" or "paid"'));
     }
 
     const result = await listPrompts({
@@ -143,11 +127,7 @@ router.get('/prompts', optionalAuth, async (req, res, next) => {
 router.get('/prompts/:id', optionalAuth, async (req, res, next) => {
   try {
     const prompt = await getPromptById(req.params.id, req.userId);
-    if (!prompt) {
-      const err = new Error('Prompt not found');
-      err.status = 404;
-      return next(err);
-    }
+    if (!prompt) return next(httpError(404, 'Prompt not found'));
 
     // Fire-and-forget view count — never fail the request on a bump.
     recordPromptView(prompt.id);
@@ -170,9 +150,7 @@ router.get('/prompts/:id/image', optionalAuth, async (req, res, next) => {
   try {
     const prompt = await getPromptById(req.params.id, req.userId);
     if (!prompt || !prompt.imageUrl) {
-      const err = new Error('Prompt image not found');
-      err.status = 404;
-      return next(err);
+      return next(httpError(404, 'Prompt image not found'));
     }
     const isAdmin = Boolean(req.user && isAdminEmail(req.user.email));
     if (!prompt.isPaid || isAdmin) {
@@ -209,12 +187,7 @@ router.delete('/prompts/:id', requireAuth, async (req, res, next) => {
       userId: req.userId,
       isAdmin: isAdminEmail(req.user?.email),
     });
-    if (result.error) {
-      const { status, message } = result.error;
-      const err = new Error(message);
-      err.status = status;
-      return next(err);
-    }
+    if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json(result);
   } catch (err) {
     return next(err);
@@ -227,11 +200,7 @@ router.delete('/prompts/:id', requireAuth, async (req, res, next) => {
 router.post('/prompts/:id/save', requireAuth, async (req, res, next) => {
   try {
     const result = await savePrompt(req.params.id, req.userId);
-    if (result.notFound) {
-      const err = new Error('Prompt not found');
-      err.status = 404;
-      return next(err);
-    }
+    if (result.notFound) return next(httpError(404, 'Prompt not found'));
     return res.json(result);
   } catch (err) {
     return next(err);
