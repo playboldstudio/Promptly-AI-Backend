@@ -13,6 +13,7 @@ import { optionalAuth, requireAuth } from '../middleware/auth.js';
 import { isAdminEmail } from '../config/env.js';
 import { uploadImage } from '../services/storage.service.js';
 import { watermarkedPromptImage } from '../services/image-watermark.service.js';
+import { moderateImage } from '../services/image-moderation.service.js';
 import { parsePaging } from '../utils/paging.js';
 import { httpError } from '../utils/http-error.js';
 import { PROMPT_CATEGORIES } from '../utils/prompt-import.js';
@@ -67,6 +68,14 @@ router.post(
         return next(httpError(400, 'Send the image file as the raw request body (image/jpeg, image/png, …)'));
       }
       const contentType = String(req.headers['content-type'] ?? 'image/jpeg').split(';')[0].trim();
+
+      // Server-side NSFW moderation — reject adult/racy images for non-admins.
+      // Admins are exempt (admin bulk import uses a separate route).
+      const mod = await moderateImage(req.body, contentType);
+      if (!mod.safe) {
+        return next(httpError(422, mod.reason));
+      }
+
       const imageUrl = await uploadImage({
         folder: `prompts/${req.userId}`,
         buffer: req.body,

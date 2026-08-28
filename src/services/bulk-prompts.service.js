@@ -46,18 +46,30 @@ export async function bulkUploadPrompts({ userId, adminEmail, csvText, imagesByN
   const now = new Date();
   const folder = `prompts/admin/${Date.now()}`;
 
+  // Deduplicate image uploads: many rows often reference the same filename.
+  // Upload each distinct image once and reuse the URL across all rows that
+  // share it — cuts N identical GCS uploads down to 1.
+  const uploadedUrls = new Map(); // imageName → public URL
+
   const enriched = await mapWithConcurrency(valid, 8, async (item) => {
     let imageUrl = null;
     let images = [];
     if (item.imageName) {
-      const file = imagesByName.get(item.imageName);
-      const url = await uploadImage({
-        folder,
-        buffer: file.buffer,
-        contentType: file.mimetype || 'image/jpeg',
-      });
-      imageUrl = url;
-      images = [url];
+      const cached = uploadedUrls.get(item.imageName);
+      if (cached) {
+        imageUrl = cached;
+        images = [cached];
+      } else {
+        const file = imagesByName.get(item.imageName);
+        const url = await uploadImage({
+          folder,
+          buffer: file.buffer,
+          contentType: file.mimetype || 'image/jpeg',
+        });
+        uploadedUrls.set(item.imageName, url);
+        imageUrl = url;
+        images = [url];
+      }
     }
     return { ...item, id: crypto.randomUUID(), imageUrl, images };
   });
