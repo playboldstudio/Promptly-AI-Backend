@@ -200,6 +200,7 @@ export async function deleteAccount(userId) {
       collection: COLS.savedPrompts,
       filters: [{ field: 'userId', value: userId }],
       fieldMask: ['id'],
+      limit: 10000,
     });
     await removeMany(COLS.savedPrompts, saved.rows.map((s) => s.id));
   } catch {

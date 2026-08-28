@@ -67,6 +67,14 @@
       ]
     },
     {
+      "collectionGroup": "saved_prompts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "userId", "order": "ASCENDING" },
+        { "fieldPath": "savedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "prompt_purchases",
       "queryScope": "COLLECTION",
       "fields": [

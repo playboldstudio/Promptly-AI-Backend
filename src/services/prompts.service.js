@@ -260,6 +260,7 @@ export async function deletePrompt({ id, userId, isAdmin }) {
       collection: COLS.savedPrompts,
       filters: [{ field: 'promptId', value: id }],
       fieldMask: ['id'],
+      limit: 10000,
     });
     await removeMany(COLS.savedPrompts, saved.rows.map((s) => s.id));
   } catch {
