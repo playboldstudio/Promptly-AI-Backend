@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { firebaseAuth } from '../db/firestore.js';
 import { COLS, findByPk, queryAll, upsert } from '../db/firestoreRepo.js';
 import { rateLimit } from '../middleware/rateLimit.js';
+import { httpError } from '../utils/http-error.js';
 
 const router = Router();
 
@@ -13,11 +14,7 @@ const loginSchema = z.object({ idToken: z.string().min(1) });
 router.post('/auth/login', loginLimiter, async (req, res, next) => {
   try {
     const parsed = loginSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      const err = new Error('Invalid body — expected { idToken: string }');
-      err.status = 400;
-      return next(err);
-    }
+    if (!parsed.success) return next(httpError(400, 'Invalid body — expected { idToken: string }'));
 
     const decoded = await firebaseAuth.verifyIdToken(parsed.data.idToken, true);
     const uid = decoded.uid;
@@ -38,9 +35,7 @@ router.post('/auth/login', loginLimiter, async (req, res, next) => {
     return res.json({ user, token: parsed.data.idToken });
   } catch (err) {
     // Token invalid/expired — surface as 401.
-    const e = new Error('Invalid or expired Firebase token');
-    e.status = 401;
-    return next(e);
+    return next(httpError(401, 'Invalid or expired Firebase token'));
   }
 });
 
@@ -57,9 +52,7 @@ const devLoginSchema = z.object({
 router.post('/auth/dev/login', loginLimiter, async (req, res, next) => {
   try {
     if (process.env.NODE_ENV === 'production') {
-      const err = new Error('Not found');
-      err.status = 404;
-      return next(err);
+      return next(httpError(404, 'Not found'));
     }
 
     const parsed = devLoginSchema.safeParse(req.body ?? {});

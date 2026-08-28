@@ -132,8 +132,8 @@ export async function remove(collection, id) {
  *   filters: [{ field, op, value }] (op in '==','!=','<','<=','>','>=','array-contains')
  *   orderBy: { field, direction: 'asc'|'desc' } (default desc on createdAt handled by caller)
  * Returns { rows: object[], count: number } — count is the limit-capped number
- * listed (Firestore has no cheap total count for paging; we return rows.length
- * and the route's response shape is preserved with a best-effort total).
+ * listed. Prefer server-side pagination (`orderBy` + `limit`/`offset`) over
+ * offsetting in memory; for an exact `total` use `countDocuments`.
  */
 export async function queryAll({
   collection,
@@ -164,6 +164,26 @@ export async function queryAll({
 }
 
 /**
+ * Count documents matching filters using Firestore's aggregation query
+ * (`Query.count()`), available from firebase-admin 12.x. Returns the exact
+ * count, or null when the aggregation API is unavailable (guarded so old SDKs
+ * fall back to the caller's page-size heuristic instead of failing requests).
+ */
+export async function countDocuments(collection, filters = []) {
+  try {
+    let ref = db.collection(collection);
+    for (const f of filters) {
+      ref = ref.where(f.field, f.op ?? '==', f.value);
+    }
+    const aggr = ref.count();
+    const snap = await aggr.get();
+    return Number(snap.data().count ?? 0);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Create many docs with deterministic ids in batched commits (Firestore caps a
  * single batch at 500 writes). Returns the created doc ids. Chunks the input so
  * bulk imports of 1,000+ prompts don't fan out into thousands of writes.
@@ -187,17 +207,52 @@ export async function batchCreate(collection, entries) {
   return created;
 }
 
-/** Load many docs by ids in parallel. Returns objects keyed by id. */
+/**
+ * Load many docs by ids in chunks of parallel gets. Firestore caps a single
+ * query at 30 disjunctive `in` values, but document gets have no such limit —
+ * they only cost one round-trip each. Chunking bounds the fan-out so a 500-row
+ * bulk delete path doesn't open 500 simultaneous connections. Returns objects
+ * keyed by id, preserving insertion order.
+ */
 export async function getMany(collection, ids) {
   const out = {};
   if (!ids.length) return out;
-  await Promise.all(
-    ids.map(async (id) => {
-      const obj = await findByPk(collection, id);
-      if (obj) out[id] = obj;
-    }),
-  );
+  const CHUNK_LIMIT = 32;
+  for (let i = 0; i < ids.length; i += CHUNK_LIMIT) {
+    const chunk = ids.slice(i, i + CHUNK_LIMIT);
+    const objs = await Promise.all(chunk.map((id) => findByPk(collection, id)));
+    for (let j = 0; j < chunk.length; j++) {
+      const obj = objs[j];
+      if (obj) out[chunk[j]] = obj;
+    }
+  }
   return out;
+}
+
+/**
+ * Delete many docs by id in parallel (chunked, bounded fan-out). Returns the
+ * number of docs that actually existed. Firestore deletes are cheap; the write
+ * cap is per-transaction, and a standalone delete is backpressure-safe. Used on
+ * bulk-cleanup paths (account saved prompts). Missing ids are skipped.
+ */
+export async function removeMany(collection, ids) {
+  if (!ids.length) return 0;
+  let removed = 0;
+  const CHUNK_LIMIT = 32;
+  for (let i = 0; i < ids.length; i += CHUNK_LIMIT) {
+    const chunk = ids.slice(i, i + CHUNK_LIMIT);
+    const results = await Promise.all(
+      chunk.map(async (id) => {
+        const ref = db.collection(collection).doc(id);
+        const snap = await ref.get();
+        if (!snap.exists) return false;
+        await ref.delete();
+        return true;
+      }),
+    );
+    removed += results.filter(Boolean).length;
+  }
+  return removed;
 }
 
 // ---------------------------------------------------------------------------

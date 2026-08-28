@@ -5,6 +5,8 @@ import { isAdminEmail } from '../config/env.js';
 import { getProfile, getMyPrompts, getSavedPrompts, getPurchasedPrompts, getTransactions, setUpiId, setBankDetails, clearBankDetails, deleteAccount, updateProfile } from '../services/me.service.js';
 import { getEarningsSummary, getEarningsByPrompt } from '../services/earnings.service.js';
 import { uploadImage } from '../services/storage.service.js';
+import { parsePaging } from '../utils/paging.js';
+import { httpError } from '../utils/http-error.js';
 
 const router = Router();
 
@@ -44,10 +46,7 @@ const bankSchema = z.object({
   bankBranch: z.string().trim().min(2).max(80),
 });
 
-const paging = (req) => ({
-  limit: Math.min(Number(req.query.limit) || 50, 100),
-  offset: Math.max(Number(req.query.offset) || 0, 0),
-});
+const paging = (req) => parsePaging(req.query);
 
 router.get('/profile', async (req, res, next) => {
   try {
@@ -115,11 +114,7 @@ router.get('/earnings/prompts', async (req, res, next) => {
 router.post('/upi', async (req, res, next) => {
   try {
     const parsed = upiSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      const err = new Error(parsed.error.issues[0]?.message ?? 'Invalid body — expected { upiId: string }');
-      err.status = 400;
-      return next(err);
-    }
+    if (!parsed.success) return next(httpError(400, parsed.error.issues[0]?.message ?? 'Invalid body — expected { upiId: string }'));
     const user = await setUpiId(req.userId, parsed.data.upiId);
     return res.json({ user });
   } catch (err) {
@@ -134,11 +129,7 @@ router.post('/upi', async (req, res, next) => {
 router.post('/bank', async (req, res, next) => {
   try {
     const parsed = bankSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      const err = new Error(parsed.error.issues[0]?.message ?? 'Invalid body');
-      err.status = 400;
-      return next(err);
-    }
+    if (!parsed.success) return next(httpError(400, parsed.error.issues[0]?.message ?? 'Invalid body'));
     const user = await setBankDetails(req.userId, parsed.data);
     return res.json({ user });
   } catch (err) {
@@ -183,6 +174,13 @@ function parseRawImage(req) {
   return { buffer: req.body, contentType };
 }
 
+/** Upload a raw image body to the user's KYC folder; returns the public URL. */
+async function uploadKycImage(req, reqUserId) {
+  const img = parseRawImage(req);
+  if (img.error) throw httpError(400, img.error);
+  return uploadImage({ folder: `kyc/${reqUserId}`, buffer: img.buffer, contentType: img.contentType });
+}
+
 /**
  * POST /me/bank/pan-image — upload the PAN card image (raw body).
  */
@@ -191,17 +189,7 @@ router.post(
   raw({ type: 'image/*', limit: '3mb' }),
   async (req, res, next) => {
     try {
-      const img = parseRawImage(req);
-      if (img.error) {
-        const err = new Error(img.error);
-        err.status = 400;
-        return next(err);
-      }
-      const panImageUrl = await uploadImage({
-        folder: `kyc/${req.userId}`,
-        buffer: img.buffer,
-        contentType: img.contentType,
-      });
+      const panImageUrl = await uploadKycImage(req, req.userId);
       const user = await setBankDetails(req.userId, { panImageUrl });
       return res.json({ user, panImageUrl });
     } catch (err) {
@@ -219,17 +207,7 @@ router.post(
   raw({ type: 'image/*', limit: '3mb' }),
   async (req, res, next) => {
     try {
-      const img = parseRawImage(req);
-      if (img.error) {
-        const err = new Error(img.error);
-        err.status = 400;
-        return next(err);
-      }
-      const bankAccountImageUrl = await uploadImage({
-        folder: `kyc/${req.userId}`,
-        buffer: img.buffer,
-        contentType: img.contentType,
-      });
+      const bankAccountImageUrl = await uploadKycImage(req, req.userId);
       const user = await setBankDetails(req.userId, { bankAccountImageUrl });
       return res.json({ user, bankAccountImageUrl });
     } catch (err) {
@@ -245,11 +223,7 @@ router.post(
 router.patch('/profile', async (req, res, next) => {
   try {
     const parsed = profilePatchSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      const err = new Error(parsed.error.issues[0]?.message ?? 'Invalid body');
-      err.status = 400;
-      return next(err);
-    }
+    if (!parsed.success) return next(httpError(400, parsed.error.issues[0]?.message ?? 'Invalid body'));
     const user = await updateProfile(req.userId, parsed.data);
     return res.json({ user });
   } catch (err) {
@@ -267,9 +241,7 @@ router.post(
   async (req, res, next) => {
     try {
       if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
-        const err = new Error('Send the image file as the raw request body (image/jpeg, image/png, …)');
-        err.status = 400;
-        return next(err);
+        return next(httpError(400, 'Send the image file as the raw request body (image/jpeg, image/png, …)'));
       }
       const contentType = String(req.headers['content-type'] ?? 'image/jpeg').split(';')[0].trim();
       const avatarUrl = await uploadImage({
@@ -280,7 +252,6 @@ router.post(
       const user = await updateProfile(req.userId, { avatarUrl });
       return res.json({ user, avatarUrl });
     } catch (err) {
-      if (err.status) return next(err);
       return next(err);
     }
   },

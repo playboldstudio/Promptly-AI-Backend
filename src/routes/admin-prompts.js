@@ -5,6 +5,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { isAdminEmail } from '../config/env.js';
 import { bulkUploadPrompts } from '../services/bulk-prompts.service.js';
 import { normalizeImageName, validateBulkRows, IMAGE_MIME_BY_EXT } from '../utils/prompt-import.js';
+import { httpError } from '../utils/http-error.js';
 
 /**
  * Admin bulk prompt import.
@@ -52,9 +53,7 @@ const bulkFields = [
 
 function requireAdmin(req, res, next) {
   if (!req.user || !isAdminEmail(req.user.email)) {
-    const err = new Error('Admin access required');
-    err.status = 403;
-    return next(err);
+    return next(httpError(403, 'Admin access required'));
   }
   return next();
 }
@@ -139,11 +138,7 @@ router.post(
   async (req, res, next) => {
     try {
       const payload = extractImportPayload(req);
-      if (payload.error) {
-        const err = new Error(payload.error);
-        err.status = 400;
-        return next(err);
-      }
+      if (payload.error) return next(httpError(400, payload.error));
       const result = validateBulkRows(payload.csvText, imagesByName(payload.images));
       const total = result.valid.length + result.errors.length;
       return res.json({
@@ -172,11 +167,7 @@ router.post(
   async (req, res, next) => {
     try {
       const payload = extractImportPayload(req);
-      if (payload.error) {
-        const err = new Error(payload.error);
-        err.status = 400;
-        return next(err);
-      }
+      if (payload.error) return next(httpError(400, payload.error));
       const report = await bulkUploadPrompts({
         userId: req.userId,
         adminEmail: req.user.email,

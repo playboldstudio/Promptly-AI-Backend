@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { COLS, findByPk, queryAll, remove, upsert, create, getMany, increment } from '../db/firestoreRepo.js';
+import { COLS, findByPk, queryAll, removeMany, upsert, create, getMany, increment, countDocuments } from '../db/firestoreRepo.js';
 import { derivePromptFlags } from './prompt-metrics.js';
 import { isAdminEmail } from '../config/env.js';
 import { currentActiveSubscriptionWithPlan } from './payments/subscription-utils.js';
@@ -21,7 +21,8 @@ const PUBLIC_PROMPT_ATTRS = [
   'createdAt',
 ];
 
-const AUTHOR_ATTRS = ['id', 'fullName', 'avatarUrl', 'role'];
+/** Bounded catalog read for semantic browse (search/trending/filters). */
+const PHOTOS_CATALOG_MAX = 10000;
 
 /** Normalize a prompt's image list — legacy docs only have imageUrl (cover). */
 function normalizeImages(json) {
@@ -32,15 +33,15 @@ function normalizeImages(json) {
       : [];
 }
 
+/** Whitelist-authored author shape — never echoes raw user fields to clients. */
 function serializeAuthor(author) {
-  return author
-    ? {
-        id: author.id,
-        fullName: author.fullName,
-        avatarUrl: author.avatarUrl,
-        role: author.role,
-      }
-    : null;
+  if (!author) return null;
+  return {
+    id: author.id,
+    fullName: author.fullName,
+    avatarUrl: author.avatarUrl,
+    role: author.role,
+  };
 }
 
 function toPublicPrompt(json) {
@@ -51,26 +52,48 @@ function toPublicPrompt(json) {
 }
 
 /**
- * List published prompts with the browse filters. Firestore has no substring
- * or cross-field OR, so the published set is filtered/sorted in memory — fine
- * at this scale.
+ * Semantic filters (category, paid, trending sort, search) require reading the
+ * browse set — Firestore has no substring/cross-field OR and no computed-key
+ * ordering. It picks the smallest readable slice for the requested page:
+ *   - pure "new" browse (the default feed): a plain paginated query into
+ *     Firestore, so the catalog can grow without loading every doc.
+ *   - "trending" + unpaginated search: resolves to a bounded catalog read
+ *     (PHOTOS_CATALOG_MAX) plus in-memory sort — at this scale the whole
+ *     published set still fits comfortably in one instance's memory.
  */
 export async function listPrompts({ category, paid, sort, q, viewerId, limit = 50, offset = 0 }) {
-  const all = await queryAll({
+  // Pure "new" feed with no semantic filter → push pagination to Firestore.
+  if (sort !== 'trending' && !q && !category && !paid) {
+    const [page, total] = await Promise.all([
+      queryAll({
+        collection: COLS.prompts,
+        filters: [{ field: 'status', value: 'published' }],
+        orderBy: { field: 'createdAt', direction: 'desc' },
+        limit,
+        offset,
+      }),
+      countDocuments(COLS.prompts, [{ field: 'status', value: 'published' }]),
+    ]);
+    return withAuthorsAndSaveState(page.rows, viewerId, limit, offset, total);
+  }
+
+  // Semantic filters (category/paid/search/trending) — read a bounded catalog
+  // and filter/sort in memory. PHOTOS_CATALOG_MAX is a documented cap, not a
+  // hidden growth limit.
+  const { rows } = await queryAll({
     collection: COLS.prompts,
     filters: [{ field: 'status', value: 'published' }],
     orderBy: { field: 'createdAt', direction: 'desc' },
-    limit: 10000, // load the catalog; small-scale app
+    limit: PHOTOS_CATALOG_MAX,
   });
 
-  let rows = all.rows;
-
-  if (category) rows = rows.filter((r) => r.category === category);
-  if (paid === 'free') rows = rows.filter((r) => !r.isPaid);
-  if (paid === 'paid') rows = rows.filter((r) => r.isPaid);
+  let filtered = rows;
+  if (category) filtered = filtered.filter((r) => r.category === category);
+  if (paid === 'free') filtered = filtered.filter((r) => !r.isPaid);
+  if (paid === 'paid') filtered = filtered.filter((r) => r.isPaid);
   if (q) {
     const needle = q.toLowerCase();
-    rows = rows.filter((r) =>
+    filtered = filtered.filter((r) =>
       (r.title ?? '').toLowerCase().includes(needle) ||
       (r.description ?? '').toLowerCase().includes(needle) ||
       (Array.isArray(r.tags) && r.tags.some((t) => t.toLowerCase().includes(needle))),
@@ -78,18 +101,23 @@ export async function listPrompts({ category, paid, sort, q, viewerId, limit = 5
   }
 
   if (sort === 'trending') {
-    rows = rows.sort(
+    filtered = filtered.sort(
       (a, b) =>
         (Number(b.viewCount) + Number(b.saveCount)) -
         (Number(a.viewCount) + Number(a.saveCount)),
     );
-  } else {
-    rows = rows.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   }
 
-  const total = rows.length;
-  const page = rows.slice(offset, offset + limit);
+  const page = filtered.slice(offset, offset + limit);
+  return withAuthorsAndSaveState(page, viewerId, limit, offset, filtered.length);
+}
 
+/**
+ * Enrich a page of prompt rows with authors, savedByMe and a total.
+ * `total` is exact (count aggregation from the pure-feed path, or the
+ * in-memory filtered length from the semantic path).
+ */
+async function withAuthorsAndSaveState(page, viewerId, limit, offset, total) {
   const authorIds = [...new Set(page.map((r) => r.authorId).filter(Boolean))];
   const authors = authorIds.length ? await getMany(COLS.users, authorIds) : {};
 
@@ -99,7 +127,7 @@ export async function listPrompts({ category, paid, sort, q, viewerId, limit = 5
     const saved = await queryAll({
       collection: COLS.savedPrompts,
       filters: [{ field: 'userId', value: viewerId }],
-      limit: 10000,
+      fieldMask: ['promptId'],
     });
     savedIds = new Set(saved.rows.map((s) => s.promptId));
   }
@@ -223,17 +251,17 @@ export async function deletePrompt({ id, userId, isAdmin }) {
     return { error: { status: 403, message: 'Only the author or an admin can delete this prompt' } };
   }
 
-  await remove(COLS.prompts, id);
+  await removeMany(COLS.prompts, [id]);
 
-  // Clean up the saves pointing at this prompt (fire-and-forget is safe here —
+  // Clean up the saves pointing at this prompt (bounded, chunked fan-out —
   // a failed save row is harmless, but the prompt itself is gone).
   try {
     const saved = await queryAll({
       collection: COLS.savedPrompts,
       filters: [{ field: 'promptId', value: id }],
-      limit: 10000,
+      fieldMask: ['id'],
     });
-    await Promise.all(saved.rows.map((s) => remove(COLS.savedPrompts, s.id)));
+    await removeMany(COLS.savedPrompts, saved.rows.map((s) => s.id));
   } catch {
     // non-fatal
   }

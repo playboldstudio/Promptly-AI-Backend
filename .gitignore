@@ -10,6 +10,11 @@ build/
 .env.local
 .env.*.local
 
+# Service-account keys — never commit a private key
+firebase-sa-key.json
+*-sa-key.json
+*-sa-key.json.txt
+
 # Service-account keys / credentials — never commit secrets.
 *service-account*.json
 *-service-account*.json

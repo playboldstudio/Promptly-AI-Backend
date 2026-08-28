@@ -4,7 +4,8 @@ import {
   queryAll,
   getMany,
   upsert,
-  remove,
+  removeMany,
+  countDocuments,
 } from '../db/firestoreRepo.js';
 import { firebaseAuth } from '../db/firestore.js';
 import { currentActiveSubscriptionWithPlan } from './payments/subscription-utils.js';
@@ -26,27 +27,35 @@ export async function getProfile(userId) {
 }
 
 export async function getMyPrompts(userId, { limit = 50, offset = 0 } = {}) {
-  const all = await queryAll({
-    collection: COLS.prompts,
-    filters: [{ field: 'authorId', value: userId }],
-    orderBy: { field: 'createdAt', direction: 'desc' },
-    limit: 10000,
-  });
-  const prompts = all.rows.slice(offset, offset + limit);
-  return { prompts, total: all.rows.length };
+  const [page, total] = await Promise.all([
+    queryAll({
+      collection: COLS.prompts,
+      filters: [{ field: 'authorId', value: userId }],
+      orderBy: { field: 'createdAt', direction: 'desc' },
+      limit,
+      offset,
+    }),
+    countDocuments(COLS.prompts, [{ field: 'authorId', value: userId }]),
+  ]);
+  const prompts = page.rows;
+  return { prompts, total: total ?? prompts.length };
 }
 
 export async function getSavedPrompts(userId, { limit = 50, offset = 0 } = {}) {
-  const all = await queryAll({
-    collection: COLS.savedPrompts,
-    filters: [{ field: 'userId', value: userId }],
-    limit: 10000,
-  });
-  // Order newest-saved first (savedAt desc) to match the old ORDER BY.
-  const sorted = all.rows.sort((a, b) => new Date(b.savedAt) - new Date(a.savedAt));
-  const page = sorted.slice(offset, offset + limit);
+  // Order newest-saved first (savedAt desc) — pagination is server-side now.
+  const [page, total] = await Promise.all([
+    queryAll({
+      collection: COLS.savedPrompts,
+      filters: [{ field: 'userId', value: userId }],
+      orderBy: { field: 'savedAt', direction: 'desc' },
+      limit,
+      offset,
+    }),
+    countDocuments(COLS.savedPrompts, [{ field: 'userId', value: userId }]),
+  ]);
+  const rows = page.rows;
 
-  const promptIds = page.map((r) => r.promptId).filter(Boolean);
+  const promptIds = rows.map((r) => r.promptId).filter(Boolean);
   const prompts = promptIds.length ? await getMany(COLS.prompts, promptIds) : {};
 
   // Gate the paid prompt body the same way the prompt feed/detail do:
@@ -61,7 +70,7 @@ export async function getSavedPrompts(userId, { limit = 50, offset = 0 } = {}) {
   });
   const unlockedIds = new Set(unlockedQuery.rows.map((p) => p.promptId));
 
-  const saved = page.map((row) => {
+  const saved = rows.map((row) => {
     const prompt = prompts[row.promptId];
     const json = prompt ? { ...prompt } : {};
     const unlocked =
@@ -82,22 +91,26 @@ export async function getSavedPrompts(userId, { limit = 50, offset = 0 } = {}) {
     };
   });
 
-  return { saved, total: sorted.length };
+  return { saved, total: total ?? saved.length };
 }
 
 export async function getPurchasedPrompts(userId, { limit = 50, offset = 0 } = {}) {
-  const all = await queryAll({
-    collection: COLS.promptPurchases,
-    filters: [{ field: 'buyerId', value: userId }, { field: 'status', value: 'completed' }],
-    orderBy: { field: 'createdAt', direction: 'desc' },
-    limit: 10000,
-  });
-  const page = all.rows.slice(offset, offset + limit);
+  const [page, total] = await Promise.all([
+    queryAll({
+      collection: COLS.promptPurchases,
+      filters: [{ field: 'buyerId', value: userId }, { field: 'status', value: 'completed' }],
+      orderBy: { field: 'createdAt', direction: 'desc' },
+      limit,
+      offset,
+    }),
+    countDocuments(COLS.promptPurchases, [{ field: 'buyerId', value: userId }, { field: 'status', value: 'completed' }]),
+  ]);
+  const rows = page.rows;
 
-  const promptIds = page.map((r) => r.promptId).filter(Boolean);
+  const promptIds = rows.map((r) => r.promptId).filter(Boolean);
   const prompts = promptIds.length ? await getMany(COLS.prompts, promptIds) : {};
 
-  const purchases = page.map((row) => {
+  const purchases = rows.map((row) => {
     const prompt = prompts[row.promptId];
     return {
       purchaseId: row.id,
@@ -108,18 +121,22 @@ export async function getPurchasedPrompts(userId, { limit = 50, offset = 0 } = {
     };
   });
 
-  return { purchases, total: all.rows.length };
+  return { purchases, total: total ?? purchases.length };
 }
 
 export async function getTransactions(userId, { limit = 50, offset = 0 } = {}) {
-  const all = await queryAll({
-    collection: COLS.transactions,
-    filters: [{ field: 'userId', value: userId }],
-    orderBy: { field: 'createdAt', direction: 'desc' },
-    limit: 10000,
-  });
-  const transactions = all.rows.slice(offset, offset + limit);
-  return { transactions, total: all.rows.length };
+  const [page, total] = await Promise.all([
+    queryAll({
+      collection: COLS.transactions,
+      filters: [{ field: 'userId', value: userId }],
+      orderBy: { field: 'createdAt', direction: 'desc' },
+      limit,
+      offset,
+    }),
+    countDocuments(COLS.transactions, [{ field: 'userId', value: userId }]),
+  ]);
+  const transactions = page.rows;
+  return { transactions, total: total ?? transactions.length };
 }
 
 export async function setUpiId(userId, upiId) {
@@ -177,14 +194,14 @@ export async function deleteAccount(userId) {
     // non-fatal — cancellation is best-effort on account removal
   }
 
-  // Clean up the user's saved prompts.
+  // Clean up the user's saved prompts (bounded, chunked fan-out).
   try {
     const saved = await queryAll({
       collection: COLS.savedPrompts,
       filters: [{ field: 'userId', value: userId }],
-      limit: 10000,
+      fieldMask: ['id'],
     });
-    await Promise.all(saved.rows.map((s) => remove(COLS.savedPrompts, s.id)));
+    await removeMany(COLS.savedPrompts, saved.rows.map((s) => s.id));
   } catch {
     // non-fatal
   }
