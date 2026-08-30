@@ -35,6 +35,17 @@ const createPromptSchema = z
   .refine((v) => !v.isPaid || (v.isPaid && v.priceInr), {
     message: 'A paid prompt requires a positive priceInr',
     path: ['priceInr'],
+  })
+  .superRefine((v, ctx) => {
+    const hasUrl = !!v.imageUrl?.trim();
+    const hasImages = Array.isArray(v.images) && v.images.length > 0;
+    if (!hasUrl && !hasImages) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'At least one image is required — provide imageUrl or images[]',
+        path: ['imageUrl'],
+      });
+    }
   });
 
 /**
