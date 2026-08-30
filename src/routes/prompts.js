@@ -42,7 +42,7 @@ const createPromptSchema = z
     if (!hasUrl && !hasImages) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'At least one image is required — provide imageUrl or images[]',
+        message: 'A cover image is required. Please add an image to your prompt.',
         path: ['imageUrl'],
       });
     }

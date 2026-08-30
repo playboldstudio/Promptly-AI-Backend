@@ -124,16 +124,16 @@ export function validateBulkRows(csvText, imagesByName = new Map()) {
     else if (title.length > MAX_TITLE) reasons.push(`Title too long (max ${MAX_TITLE} chars)`);
     if (!description) reasons.push('Missing description');
     else if (description.length > MAX_DESCRIPTION) reasons.push(`Description too long (max ${MAX_DESCRIPTION} chars)`);
-    if (!promptText) reasons.push('Missing promptText');
-    if (!imageName) reasons.push('Missing image');
-    if (!PROMPT_CATEGORIES.includes(category)) reasons.push(`Invalid category "${category}"`);
+    if (!promptText) reasons.push('Missing prompt text');
+    if (!imageName) reasons.push('Add an image filename in the Image column — an image is required for every row');
+    if (!PROMPT_CATEGORIES.includes(category)) reasons.push(`"${category}" is not a valid category`);
     if (tags.length > MAX_TAGS) reasons.push(`Too many tags (max ${MAX_TAGS})`);
     if (tags.some((t) => t.length > MAX_TAG_LEN)) reasons.push(`Tag too long (max ${MAX_TAG_LEN} chars)`);
-    if (isPaid === null) reasons.push('Invalid isPaid value (use true/false)');
-    else if (isPaid && priceInr === null) reasons.push('Paid prompt requires a positive priceInr');
-    if (imageName && !isImageFilename(imageName)) reasons.push(`Invalid image filename "${imageName}"`);
+    if (isPaid === null) reasons.push('Invalid "Paid" value (use true/false)');
+    else if (isPaid && priceInr === null) reasons.push('Paid prompts need a positive price (INR)');
+    if (imageName && !isImageFilename(imageName)) reasons.push(`"${imageName}" is not a supported image file`);
     if (imageName && !imagesByName.has(normalizeImageName(imageName))) {
-      reasons.push(`Image "${imageName}" not found in upload`);
+      reasons.push(`Image "${imageName}" was not found in the upload`);
     }
 
     if (!reasons.length) {
