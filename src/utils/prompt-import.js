@@ -125,6 +125,7 @@ export function validateBulkRows(csvText, imagesByName = new Map()) {
     if (!description) reasons.push('Missing description');
     else if (description.length > MAX_DESCRIPTION) reasons.push(`Description too long (max ${MAX_DESCRIPTION} chars)`);
     if (!promptText) reasons.push('Missing promptText');
+    if (!imageName) reasons.push('Missing image');
     if (!PROMPT_CATEGORIES.includes(category)) reasons.push(`Invalid category "${category}"`);
     if (tags.length > MAX_TAGS) reasons.push(`Too many tags (max ${MAX_TAGS})`);
     if (tags.some((t) => t.length > MAX_TAG_LEN)) reasons.push(`Tag too long (max ${MAX_TAG_LEN} chars)`);
