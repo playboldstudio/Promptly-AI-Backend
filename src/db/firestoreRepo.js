@@ -66,10 +66,6 @@ export function increment(n = 1) {
   return FieldValue.increment(n);
 }
 
-export function serverTimestamp() {
-  return FieldValue.serverTimestamp();
-}
-
 /**
  * Get a doc by id (or by a deterministic id you compute). Returns null if absent.
  */
@@ -283,18 +279,6 @@ export function inTxQueryAll(tx, { collection, filters = [], orderBy, limit = 50
   });
 }
 
-/** Read a doc ref's object inside a transaction. */
-export function inTxGetRef(tx, ref) {
-  return tx.get(ref).then((s) => toObject(s));
-}
-
-/** Create a doc inside a transaction (throws if the id already exists). */
-export function inTxCreate(tx, collection, id, data) {
-  const ref = db.collection(collection).doc(id);
-  tx.create(ref, toWritePayload(data));
-  return ref;
-}
-
 /** Upsert (merge) a doc inside a transaction. */
 export function inTxSet(tx, collection, id, data, merge = true) {
   const ref = db.collection(collection).doc(id);
@@ -307,11 +291,6 @@ export function inTxUpdate(tx, collection, id, patch) {
   const ref = db.collection(collection).doc(id);
   tx.update(ref, toWritePayload(patch));
   return ref;
-}
-
-/** Delete a doc inside a transaction. */
-export function inTxDelete(tx, collection, id) {
-  tx.delete(db.collection(collection).doc(id));
 }
 
 /** Add a doc with an auto-generated id inside a transaction and return its doc ref. */

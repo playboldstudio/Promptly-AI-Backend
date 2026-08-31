@@ -18,8 +18,3 @@ export function parsePaging(query = {}) {
   const offset = Number.isFinite(rawOffset) && rawOffset >= 1 ? Math.floor(rawOffset) : 0;
   return { limit, offset };
 }
-
-/** Build the standard { rows, limit, offset, total } list envelope. */
-export function pagedResult({ rows, total, limit, offset }) {
-  return { rows, total, limit, offset };
-}

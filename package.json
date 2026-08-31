@@ -10,9 +10,7 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "db:sync": "node src/db/sync.js",
     "db:seed": "node src/db/seed.js",
-    "db:reset": "node src/db/reset.js",
     "test": "node --test"
   },
   "dependencies": {

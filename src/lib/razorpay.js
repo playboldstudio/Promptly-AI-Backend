@@ -13,7 +13,7 @@ let _client = null;
 
 function getClient() {
   if (!env.RAZORPAY_KEY_ID || !env.RAZORPAY_KEY_SECRET) {
-    const e = new Error('Razorpay is not configured — set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET');
+    const e = new Error('Payments are not set up yet. Please try again later');
     e.status = 501;
     throw e;
   }

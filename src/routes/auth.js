@@ -14,7 +14,7 @@ const loginSchema = z.object({ idToken: z.string().min(1) });
 router.post('/auth/login', loginLimiter, async (req, res, next) => {
   try {
     const parsed = loginSchema.safeParse(req.body ?? {});
-    if (!parsed.success) return next(httpError(400, 'Invalid body — expected { idToken: string }'));
+    if (!parsed.success) return next(httpError(400, 'Invalid sign-in request'));
 
     const decoded = await firebaseAuth.verifyIdToken(parsed.data.idToken, true);
     const uid = decoded.uid;
@@ -35,7 +35,7 @@ router.post('/auth/login', loginLimiter, async (req, res, next) => {
     return res.json({ user, token: parsed.data.idToken });
   } catch (err) {
     // Token invalid/expired — surface as 401.
-    return next(httpError(401, 'Invalid or expired Firebase token'));
+    return next(httpError(401, 'Your sign-in has expired. Please sign in again'));
   }
 });
 
@@ -57,7 +57,7 @@ router.post('/auth/dev/login', loginLimiter, async (req, res, next) => {
 
     const parsed = devLoginSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
-      const err = new Error('Invalid body — expected { email: string }');
+      const err = new Error('Please provide a valid email address');
       err.status = 400;
       return next(err);
     }
