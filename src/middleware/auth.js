@@ -32,7 +32,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  */
 async function devUserByEmail(email) {
   if (!email) {
-    const e = new Error('Dev auth requires an email — send Bearer <password>:<email>');
+    const e = new Error('Sign-in requires an email address');
     e.status = 401;
     throw e;
   }
@@ -55,7 +55,7 @@ async function devUserByEmail(email) {
     user = await findByPk(COLS.users, uid);
   }
   if (!user || user.deleted) {
-    const e = new Error('Invalid or unknown auth token');
+    const e = new Error('Sign-in failed. Please try signing in again');
     e.status = 401;
     throw e;
   }
@@ -64,7 +64,7 @@ async function devUserByEmail(email) {
 
 async function resolveUser(token) {
   if (!token) {
-    const e = new Error('Authentication required — send Authorization: Bearer <token>');
+    const e = new Error('Please sign in to continue');
     e.status = 401;
     throw e;
   }
@@ -83,7 +83,7 @@ async function resolveUser(token) {
   if (UUID_RE.test(token)) {
     const user = await findByPk(COLS.users, token);
     if (!user || user.deleted) {
-      const e = new Error('Invalid or unknown auth token');
+      const e = new Error('Sign-in failed. Please try signing in again');
       e.status = 401;
       throw e;
     }
@@ -102,7 +102,7 @@ async function verifyFirebaseToken(token) {
     // Deleted accounts stay deleted — reject before the fill-in-if-missing
     // upsert below could resurrect them.
     if (existing?.deleted) {
-      const e = new Error('Account deleted — this account is no longer active');
+      const e = new Error('This account is no longer active');
       e.status = 401;
       throw e;
     }
@@ -127,7 +127,7 @@ async function verifyFirebaseToken(token) {
     const user = await findByPk(COLS.users, uid);
     return { user, userId: uid };
   } catch (err) {
-    const e = new Error('Invalid or expired auth token');
+    const e = new Error('Your session has expired. Please sign in again');
     e.status = 401;
     throw e;
   }

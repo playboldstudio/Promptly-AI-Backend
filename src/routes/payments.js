@@ -29,7 +29,7 @@ router.use(requireAuth);
 // Admin back-office: only emails listed in ADMIN_EMAILS may settle payouts.
 function requireAdmin(req, res, next) {
   if (!isAdminEmail(req.user?.email)) {
-    const err = new Error('Admin access required');
+    const err = new Error('You need admin access to do this');
     err.status = 403;
     return next(err);
   }
@@ -38,7 +38,7 @@ function requireAdmin(req, res, next) {
 
 function requireRazorpayKeys(req, res, next) {
   if (!hasRazorpayKeys) {
-    const err = new Error('Razorpay is not configured — set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET');
+    const err = new Error('Payments are temporarily unavailable. Please try again shortly');
     err.status = 501;
     return next(err);
   }
@@ -62,7 +62,7 @@ const verifySchema = z.object({
 router.post('/checkout/order', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
   try {
     const parsed = orderSchema.safeParse(req.body ?? {});
-    if (!parsed.success) return next(httpError(400, 'Invalid body — expected { promptId: uuid }'));
+    if (!parsed.success) return next(httpError(400, 'Missing the prompt for this purchase'));
     const result = await createCheckoutOrder({ buyerId: req.userId, promptId: parsed.data.promptId });
     if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json({ order: result });
@@ -78,7 +78,7 @@ router.post('/checkout/order', moneyLimiter, requireRazorpayKeys, async (req, re
 router.post('/checkout/verify', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
   try {
     const parsed = verifySchema.safeParse(req.body ?? {});
-    if (!parsed.success) return next(httpError(400, 'Invalid body — expected { promptId, orderId, paymentId, signature }'));
+    if (!parsed.success) return next(httpError(400, 'Could not confirm your payment — please try again'));
     const result = await verifyAndUnlock({ buyerId: req.userId, ...parsed.data });
     if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json({ success: true, unlocked: true, promptId: result.promptId });
@@ -96,7 +96,7 @@ const subscriptionSchema = z.object({ planId: z.enum(['pro', 'creator']) });
 router.post('/subscriptions', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
   try {
     const parsed = subscriptionSchema.safeParse(req.body ?? {});
-    if (!parsed.success) return next(httpError(400, 'Invalid body — expected { planId: "pro" | "creator" }'));
+    if (!parsed.success) return next(httpError(400, 'Please choose a valid plan'));
     const result = await createSubscription({
       userId: req.userId,
       planId: parsed.data.planId,
@@ -158,7 +158,7 @@ router.get('/payouts', async (req, res, next) => {
 router.post('/payouts', moneyLimiter, async (req, res, next) => {
   try {
     const parsed = payoutSchema.safeParse(req.body ?? {});
-    if (!parsed.success) return next(httpError(400, 'Invalid body — expected { amountInr: number }'));
+    if (!parsed.success) return next(httpError(400, 'Please enter a valid withdrawal amount'));
     const result = await requestPayout({ userId: req.userId, amountInr: parsed.data.amountInr });
     if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.status(201).json(result);

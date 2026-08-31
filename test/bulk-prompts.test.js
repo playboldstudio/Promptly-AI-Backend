@@ -48,27 +48,34 @@ test('validateBulkRows: valid rows import-ready, fields normalized', () => {
 });
 
 test('validateBulkRows: missing image, bad category, paid-without-price flagged', () => {
+  const images = new Map([['pic.jpg', { buffer: Buffer.alloc(1), mimetype: 'image/jpeg' }]]);
   const csv = [
     'title,description,promptText,category,tags,isPaid,priceInr,image',
-    'No Img,desc,text,portrait,,false,,missing.jpg',
-    'Bad Cat,desc,text,unknown,,false,,',
-    'Paid No Price,desc,text,portrait,,true,,',
+    'Missing File,desc,text,portrait,,false,,missing.jpg',
+    'No Image,desc,text,portrait,,false,,',
+    'Bad Cat,desc,text,unknown,,false,,pic.jpg',
+    'Paid No Price,desc,text,portrait,,true,,pic.jpg',
   ].join('\n');
-  const result = validateBulkRows(csv, new Map());
+  const result = validateBulkRows(csv, images);
   assert.equal(result.valid.length, 0);
-  assert.equal(result.errors.length, 3);
+  assert.equal(result.errors.length, 4);
   assert.match(result.errors[0].reason, /not found/);
-  assert.match(result.errors[1].reason, /Invalid category/);
-  assert.match(result.errors[2].reason, /positive priceInr/);
+  assert.match(result.errors[1].reason, /image is required/);
+  assert.match(result.errors[2].reason, /valid category/);
+  assert.match(result.errors[3].reason, /positive price \(INR\)/);
 });
 
 test('validateBulkRows: duplicate titles and promptText flagged', () => {
+  const images = new Map([
+    ['a.jpg', { buffer: Buffer.alloc(1), mimetype: 'image/jpeg' }],
+    ['b.jpg', { buffer: Buffer.alloc(1), mimetype: 'image/jpeg' }],
+  ]);
   const csv = [
-    'title,description,promptText,category',
-    'Same,desc A,text A,portrait',
-    'Same,desc B,text A,portrait',
+    'title,description,promptText,category,image',
+    'Same,desc A,text A,portrait,a.jpg',
+    'Same,desc B,text A,portrait,b.jpg',
   ].join('\n');
-  const result = validateBulkRows(csv, new Map());
+  const result = validateBulkRows(csv, images);
   assert.equal(result.valid.length, 1);
   assert.equal(result.errors.length, 1);
   assert.match(result.errors[0].reason, /Duplicate/);

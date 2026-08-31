@@ -76,7 +76,7 @@ router.post(
   async (req, res, next) => {
     try {
       if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
-        return next(httpError(400, 'Send the image file as the raw request body (image/jpeg, image/png, …)'));
+        return next(httpError(400, 'Please upload an image file (JPG, PNG or WebP)'));
       }
       const contentType = String(req.headers['content-type'] ?? 'image/jpeg').split(';')[0].trim();
 

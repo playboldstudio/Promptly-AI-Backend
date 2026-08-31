@@ -35,7 +35,7 @@ function handleUpload(mw) {
     mw(req, res, (err) => {
       if (err) {
         if (err.code === 'LIMIT_FILE_SIZE') {
-          err = Object.assign(new Error('File too large — max 30 MB per file'), { status: 413 });
+          err = Object.assign(new Error('File is too large (max 30 MB per file)'), { status: 413 });
         } else if (err.name === 'MulterError') {
           err = Object.assign(new Error(err.message), { status: 400 });
         }
@@ -53,7 +53,7 @@ const bulkFields = [
 
 function requireAdmin(req, res, next) {
   if (!req.user || !isAdminEmail(req.user.email)) {
-    return next(httpError(403, 'Admin access required'));
+    return next(httpError(403, 'You need admin access to do this'));
   }
   return next();
 }

@@ -40,10 +40,10 @@ function extFor(contentType) {
 /** Upload raw image bytes and return the public URL. */
 export async function uploadImage({ folder, buffer, contentType = 'image/jpeg' }) {
   if (!(buffer instanceof Buffer) || buffer.length === 0) {
-    throw Object.assign(new Error('Empty image body'), { status: 400 });
+    throw Object.assign(new Error('No image was received'), { status: 400 });
   }
   if (buffer.length > 3 * 1024 * 1024) {
-    throw Object.assign(new Error('Image too large — max 3 MB'), { status: 413 });
+    throw Object.assign(new Error('Image is too large (max 3 MB)'), { status: 413 });
   }
   const mime = MIME_BY_EXT[contentType.toLowerCase()] ?? 'image/jpeg';
   const ext = extFor(mime);
