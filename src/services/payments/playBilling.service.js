@@ -1,9 +1,11 @@
-import { COLS, findByPk, inTxGet, inTxSet, upsert } from '../../db/firestoreRepo.js';
+import { COLS, findByPk, inTxGet, inTxSet } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
 import { verifyOneTimePurchase, acknowledgePurchase, calculatePlayBillingFee } from '../../lib/playBilling.js';
 import { writeLedger } from '../ledger.js';
 import { isAdminEmail } from '../../config/env.js';
 import { getOneTimeProduct } from './products.js';
+import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
+import { creditDepositTopUpTx } from '../wallet.service.js';
 
 /** Money precision: rupees with paise — never more than 2 decimals. */
 function toMoney(value) {
@@ -68,17 +70,22 @@ export async function grantPromptUnlock({ buyerId, productId, purchaseToken }) {
   const gateway = calculatePlayBillingFee({ salePriceInr: priceInr });
 
   try {
+    // Snapshot the seller's withdrawal-fee (platform) percent so the purchase
+    // row is self-contained for reconciliation. Derives from the seller's active
+    // plan (Pro 15% / Creator 5%); defaults to the Creator rate when no plan.
+    const authorSub = await currentActiveSubscriptionWithPlan(prompt.authorId);
+    const authorFeePercent = authorSub?.plan?.platformFeePercent ?? 5;
+    // The fee-in-total snapshot shown on the purchase row (gross net after the
+    // seller's platform fee — informational; the fee is truly applied at payout).
+    const netInr = toMoney(priceInr - toMoney((priceInr * authorFeePercent) / 100));
+
     await runTransaction(async (tx) => {
       const already = await inTxGet(tx, COLS.promptPurchases, purchaseId);
       if (already) throw Object.assign(new Error('already-owns'), { alreadyOwns: true });
 
-      // Pre-read both balances BEFORE any write — Firestore transactions cannot
-      // read after a write (writeLedger below only writes when given balances).
-      const [authorBalance, buyerBalance] = await Promise.all([
-        prompt.authorId ? inTxGet(tx, COLS.userBalances, prompt.authorId) : null,
-        inTxGet(tx, COLS.userBalances, buyerId),
-      ]);
-      const authorPrev = Number(authorBalance?.balanceInr ?? 0);
+      // Pre-read the buyer's balance BEFORE any write. Firestore transactions
+      // cannot read after a write; writeLedger writes the user_balances doc.
+      const buyerBalance = await inTxGet(tx, COLS.userBalances, buyerId);
       const buyerPrev = Number(buyerBalance?.balanceInr ?? 0);
 
       // The purchase row (deterministic id guarantees one-per-buyer-per-prompt).
@@ -89,6 +96,8 @@ export async function grantPromptUnlock({ buyerId, productId, purchaseToken }) {
         priceInr,
         buyerPaysInr,
         transactionFeeInr,
+        platformFeePercent: authorFeePercent,
+        netInr,
         gateway: 'play_billing',
         gatewayOrderToken: purchaseToken,
         gatewayFeeInr: gateway.feeInr,
@@ -99,21 +108,37 @@ export async function grantPromptUnlock({ buyerId, productId, purchaseToken }) {
         updatedAt: new Date(),
       });
 
-      // Ledger — credit the creator with the FULL gross price (withdrawal fee
-      // is applied at payout, not here).
+      // Creator earnings are a wallet balance (Phase 2) — credit the FULL gross
+      // price to the seller's `earnings`. The withdrawal fee (15%/5%) is applied
+      // at payout, never here, and the Play Billing commission was absorbed by
+      // the platform at payment time (tracked on the row for reconciliation).
       if (prompt.authorId) {
-        await writeLedger(
-          tx,
-          {
-            userId: prompt.authorId,
-            type: 'paid_prompt_sale',
-            direction: 'credit',
-            amountInr: priceInr,
-            refId: purchaseId,
-            note: `Sale of "${prompt.title}" — gross ${priceInr} (withdrawal fee at payout)`,
-            balanceInr: authorPrev,
-          },
-        );
+        const authorWallet = (await inTxGet(tx, COLS.userWallets, prompt.authorId)) ?? {
+          earnings: 0,
+          deposits: 0,
+          bonus: 0,
+          bonusVintages: {},
+        };
+        const newEarnings = toMoney(Number(authorWallet.earnings ?? 0) + priceInr);
+        inTxSet(tx, COLS.userWallets, prompt.authorId, {
+          earnings: newEarnings,
+          updatedAt: new Date(),
+        });
+        inTxAdd(tx, COLS.transactions, {
+          userId: prompt.authorId,
+          type: 'paid_prompt_sale',
+          direction: 'credit',
+          amountInr: priceInr,
+          balanceType: 'earnings',
+          balanceAfterInr: newEarnings,
+          refId: purchaseId,
+          note: `Sale of "${prompt.title}" — gross ${priceInr} (withdrawal fee at payout)`,
+          gateway: 'play_billing',
+          gatewayFeeInr: gateway.feeInr,
+          platformFeeInr: 0,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
       }
 
       // Ledger — debit the buyer by the full amount paid (gross + 5% fee).
@@ -224,15 +249,11 @@ export async function grantAdFree({ userId, purchaseToken }) {
 /**
  * Handle a deposit pack top-up from a verified Play Billing purchase.
  *
- * Money model (pricing.md §4):
+ * Money model (pricing.md §4 / wallet.md §4.5):
  *  - Buyer pays the full SKU price (e.g. ₹100 for deposit_m)
  *  - Google takes ~15% commission (Play Billing fee)
- *  - Net goes to user's deposit balance (user's own money)
- *  - Fee is recycled as bonus credit (retention, 90-day expiry, FEFO)
- *
- * NOTE: Full wallet + FEFO bonus logic is Phase 2 (wallet.md). This handler
- * currently uses the simple `user_balances` model — deposits = net after fee.
- * The bonus vintage system will be layered on when the wallet is built.
+ *  - Net goes to the wallet's `deposits` (user's own money)
+ *  - The gateway fee is recycled as `bonus` (90-day vintage, FEFO spend)
  */
 export async function handleDepositTopUp({ userId, productId, purchaseToken }) {
   const product = getOneTimeProduct(productId);
@@ -250,20 +271,18 @@ export async function handleDepositTopUp({ userId, productId, purchaseToken }) {
   const gateway = calculatePlayBillingFee({ salePriceInr: priceInr });
   const gatewayFeeInr = gateway.feeInr;
   const netDeposit = priceInr - gatewayFeeInr;
+  const purchaseRowId = `${userId}_${productId}`;
 
   try {
     await runTransaction(async (tx) => {
       // Idempotent: check for an existing completed purchase with this token.
-      const existingPurchase = await inTxGet(tx, COLS.promptPurchases, `${userId}_${productId}_latest`);
+      const existingPurchase = await inTxGet(tx, COLS.promptPurchases, purchaseRowId);
       if (existingPurchase?.gatewayOrderToken === purchaseToken) {
         throw Object.assign(new Error('already-processed'), { alreadyProcessed: true });
       }
 
-      const userBalance = await inTxGet(tx, COLS.userBalances, userId);
-      const prevBalance = Number(userBalance?.balanceInr ?? 0);
-
       // Record the purchase row.
-      inTxSet(tx, COLS.promptPurchases, `${userId}_${productId}_latest`, {
+      inTxSet(tx, COLS.promptPurchases, purchaseRowId, {
         buyerId: userId,
         promptId: productId,
         authorId: null,
@@ -280,16 +299,14 @@ export async function handleDepositTopUp({ userId, productId, purchaseToken }) {
         updatedAt: new Date(),
       });
 
-      // Credit the net deposit (after gateway fee) to user's balance.
-      // The gateway fee is absorbed by the platform (tracked for reconciliation).
-      await writeLedger(tx, {
+      // Credit the wallet: NET → deposits, gateway fee → bonus vintage.
+      // (The gateway fee is the platform's cost, recycled as retention credit.)
+      creditDepositTopUpTx(tx, {
         userId,
-        type: 'deposit_credit',
-        direction: 'credit',
-        amountInr: netDeposit,
-        refId: `${userId}_${productId}_latest`,
+        priceInr,
+        gatewayFeeInr,
+        refId: purchaseRowId,
         note: `Top-up ${product.name} — net ${netDeposit} after ${gatewayFeeInr} gateway fee`,
-        balanceInr: prevBalance,
       });
     });
 

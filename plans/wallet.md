@@ -398,15 +398,15 @@ BONUS_EXPIRY_REMINDER_DAYS=7
 ## 8. Implementation order
 
 ```
-[ ] balance-types.js + BALANCE_TYPES
-[ ] wallet.service.js (get/credit/debit/split) in Firestore txs
-[ ] user_wallets collection + migration from user_balances
-[ ] GET /wallet
-[ ] wire checkout + subscriptions to wallet splits
-[ ] FEFO vintages (bonusVintages) + consumeBonus in debitBalances
-[ ] expiry sweep (Cloud Scheduler) + reminder notification
-[ ] deposit top-up split (net → deposits, fee → bonus vintage)  ★
-[ ] refund/void debit paths from play-billing (incl. deposit refund §4.6)
+[x] balance-types.js + BALANCE_TYPES
+[x] wallet.service.js (get/credit/debit/split) in Firestore txs
+[x] user_wallets collection + migration from user_balances  (npm run db:migrate-wallets)
+[x] GET /wallet
+[x] wire checkout + subscriptions to wallet splits
+[x] FEFO vintages (bonusVintages) + consumeBonus in debitBalances
+[x] expiry sweep (Cloud Scheduler) + reminder notification  (npm run wallet:expire)
+[x] deposit top-up split (net → deposits, fee → bonus vintage)  ★
+[x] refund/void debit paths from play-billing (incl. deposit refund §4.6)
 ```
 
 ## 9. Open questions

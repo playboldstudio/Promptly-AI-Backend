@@ -54,6 +54,8 @@ npm run dev                # http://localhost:8080
 | `npm test` | Unit tests (Node's built-in `node:test` — no framework dep) |
 | `npm run db:sync` | Verify Firestore connectivity (schema is implicit — no tables) |
 | `npm run db:seed` | Seed starter data into Firestore (idempotent) |
+| `npm run db:migrate-wallets` | One-time: migrate legacy `user_balances` → `user_wallets` (idempotent) |
+| `npm run wallet:expire` | Daily: bonus vintage expiry sweep (or via Cloud Scheduler) |
 | `npm run db:reset` | **Destructive** — clear all Firestore collections, then seed (dev only; refuses in production) |
 
 > Firestore is schemaless — collections are created on first write. Composite
@@ -121,7 +123,8 @@ RTDN topic pointing at `https://<cloud-run-url>/webhooks/google/rtdn`.
 | GET | `/me/transactions` | ✅ | **My Account** ledger (from `transactions`) |
 | GET | `/me/earnings` | ✅ | Creator earnings summary (lifetime, withdrawn, pending, balance) |
 | GET | `/me/earnings/prompts` | ✅ | Per-prompt earnings breakdown |
-| POST | `/payments/playbilling/verify` | ✅ | Verify a Play Billing purchase token + grant. Body `{ productId, purchaseToken, isSubscription? }`. `prompt_<id>` → paid prompt unlock (buyer pays price + 5% transaction fee; creator credited gross). `pro`/`pro_annual`/`creator`/`creator_annual` → activate subscription (+ ad-free perk). `ad_free` → one-time ad-free. `deposit_s/m/l/xl` → deposit top-up (net after gateway fee). |
+| POST | `/payments/playbilling/verify` | ✅ | Verify a Play Billing purchase token + grant. Body `{ productId, purchaseToken, isSubscription? }`. `prompt_<id>` → paid prompt unlock (buyer pays price + 5% transaction fee; creator credited **gross** to wallet `earnings`). `pro`/`pro_annual`/`creator`/`creator_annual` → activate subscription (+ ad-free perk). `ad_free` → one-time ad-free. `deposit_s/m/l/xl` → deposit top-up (net after gateway fee → `deposits`, fee recycled as `bonus`). |
+| GET | `/payments/wallet` | ✅ | Wallet breakdown: `balances` (earnings / deposits / bonus with amounts + spend rules), `totalBalanceInr`, `bonusVintages` |
 | POST | `/payments/payouts` | ✅ | Request a withdrawal (**manual settle**, min ₹60). Body `{ amountInr }`. Requires saved bank details; deducts only the withdrawal fee (15% Pro / 5% Creator), reserves the balance as `pending`. |
 | GET | `/payments/admin/payouts` | ✅ + admin | **Admin.** List payout requests with UPI details. `?status=pending`. Requires `ADMIN_EMAILS` (403 otherwise). |
 | POST | `/payments/admin/payouts/:id/mark-paid` | ✅ | **Admin.** Mark a pending payout `paid` after you've transferred the money. |
@@ -171,10 +174,10 @@ the initial stage.
 ```
 Subscriptions  Buyer ──(₹/mo, Play Billing subscriptions)──► Platform (recurring)
 Paid prompts   Buyer ──(₹ = price + 5%, Play Billing)──────► Platform (prompt unlocked)
-                                                         │  creator credited GROSS = price
+                                                         │  creator credited GROSS = price → wallet earnings
                                                          │  buyer's +5% = app income (not credited)
                                                          ▼
-                                                  Creator balance (earnings)
+                                                  Creator wallet · earnings bucket
                                                          │  withdraw (min ₹60) → deduct withdrawal fee
                                                          │    (15% Pro / 5% Creator) — only fee at payout
                                                          │  admin transfers via OWN bank app
@@ -190,6 +193,13 @@ Paid prompts   Buyer ──(₹ = price + 5%, Play Billing)──────►
 - **Play Billing commission** (~15%) — Google's cut, absorbed by the platform at
   payment time, never re-deducted at withdrawal (tracked for reconciliation).
 
+**Wallet (see `plans/wallet.md`):** every user has a `user_wallets` doc with three
+buckets — `earnings` (withdrawable), `deposits` (own money), `bonus` (spend-capped,
+expiring). A deposit top-up credits the **net** (SKU price − Play Billing fee) to
+`deposits` and recycles the fee as a **bonus** vintage (90-day expiry, FEFO spend,
+10% spend cap). Legacy `user_balances` rows were migrated by `npm run db:migrate-wallets`;
+the wallet is now the source of truth for the withdrawable earnings balance.
+
 **Why "manual settle"?** Automatic third-party bank transfers (like RazorpayX / PayU payout)
 are business-only, so a solo individual can't create a payout route. The payout flow is:
 creator requests a withdrawal → a `payouts` row is created (`pending`) and the balance is
@@ -198,9 +208,10 @@ app → `POST /payments/admin/payouts/:id/mark-paid` flips it to `paid`. `mark-f
 reverses the reservation.
 
 - All money is stored as **integer rupees** (never floats) at paise precision.
-- `prompt_purchases` freezes `priceInr / buyerPaysInr / transactionFeeInr` at sale time.
-- Every credit/debit writes one row to `transactions` (the My Account ledger).
-- Payouts reserve the balance *at request time* — `pending` money can't be double-withdrawn.
+- `prompt_purchases` freezes `priceInr / buyerPaysInr / transactionFeeInr / platformFeePercent / netInr` at sale time.
+- Every credit/debit writes one row to `transactions` with a `balanceType` (earnings/deposits/bonus — My Account ledger + wallet audit).
+- The wallet doc's `bonus` scalar ≡ Σ `bonusVintages[].remaining`. Bonus spends oldest-expiring first (FEFO) up to 10% of an item price.
+- Payouts reserve the wallet `earnings` balance *at request time* — `pending` money can't be double-withdrawn.
 - RTDN handlers are idempotent: a unique `dedupe_key` (hash of event + payload) makes
   replays no-ops, so a doubled delivery can't double-charge a subscription.
 
@@ -209,7 +220,8 @@ reverses the reservation.
 Firestore collections (schema-less; see `src/db/firestoreRepo.js` for the
 collection names): `users`, `subscription_plans`, `user_subscriptions`, `prompts`,
 `prompt_purchases`, `transactions`, `payouts`, `saved_prompts`,
-`user_balances`, plus `webhook_events` for idempotent Play Billing RTDN replay.
+`user_balances` (legacy), **`user_wallets`** (multi-balance wallet), plus
+`webhook_events` for idempotent Play Billing RTDN replay.
 
 Key invariants enforced by the service layer:
 - One unlock per buyer per prompt → deterministic doc id `(buyer_id, prompt_id)`
@@ -244,17 +256,22 @@ src/
     config.js            # db + runTransaction() + pingDb()
     sync.js              # npm run db:sync (connectivity check — schema is implicit)
     seed.js              # idempotent Firestore seed (plans, demo prompts)
+    migrate-wallets.js   # npm run db:migrate-wallets (legacy → wallet, idempotent)
     reset.js             # npm run db:reset (clears collections — destructive)
   lib/playBilling.js     # Google Play Billing client + purchase/ack/fee helpers
   middleware/            # Firebase Auth, error handler, 404
   routes/                # HTTP layer — thin, delegates to services
+  scripts/
+    expireBonus.js       # npm run wallet:expire (bonus vintage expiry sweep)
   services/              # business logic + all Firestore queries
-    ledger.js            # running balance (user_balances) + writeLedger() helpers
+    ledger.js            # legacy running balance (user_balances) + writeLedger() helpers
+    wallet.service.js    # multi-balance wallet: get/credit/debit, FEFO bonus, deposit top-up split, expiry
     prompt-metrics.js    # derived isTrending / isNew from counts + age
-    earnings.service.js  # creator earnings aggregation from prompt_purchases
+    earnings.service.js  # creator earnings aggregation (wallet-backed)
     rtdn.service.js      # Play Billing RTDN → idempotent log (dedupe doc id) → dispatch
     payments/            # Play Billing: prompt unlocks, deposits, ad-free, subscriptions, payouts
       products.js        # One-time product catalog (ad_free, deposit_*)
+      balance-types.js   # BALANCE_TYPES: earnings / deposits / bonus + spend rules & priority
       plans.js           # Built-in plans (free/pro/pro_annual/creator/creator_annual) + map
 ```
 
@@ -262,11 +279,12 @@ src/
 
 - **Admin role gating** — `/payments/admin/*` is gated by `ADMIN_EMAILS` (403 for others).
 - Refund/void flow (`prompt_purchases.status = 'voided'` → reverse ledger) — planned
-  (see `plans/play-billing.md` §7 via RTDN/post-backend).
-- Multi-balance wallet (earnings/deposits/bonus + FEFO bonus expiry) — deposits today
-  credit via `user_balances`; wallet layered on in a later phase (see `plans/wallet.md`).
+  (see `plans/play-billing.md` §7 via RTDN/post-backend). Wallet refund paths exist:
+  `refundDeposit` debits `deposits` and removes the recycled bonus vintage.
 - Automated payouts — only if/when you register a **business** account; the manual-settle
   flow is the solo-individual path
+- Per-user bonus-expiry reminder push (`getBonusExpiringSoon` exists; the notification
+  sweep is not yet wired to a push channel)
 - Distributed rate limiting (the built-in limiter is per-instance in-memory)
 - Client-side Firestore reads — **decided:** all access stays behind the API; `firestore.rules`
   denies all direct client access (the backend uses the Admin SDK, which bypasses rules)

@@ -24,6 +24,7 @@ const COLLECTIONS = Object.freeze({
   webhookEvents: 'webhook_events',
   userPosts: 'user_posts',
   userBalances: 'user_balances',
+  userWallets: 'user_wallets',
   bankAccounts: 'bank_accounts',
   kycVerifications: 'kyc_verifications',
 });

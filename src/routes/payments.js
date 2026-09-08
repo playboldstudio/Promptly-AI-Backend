@@ -14,6 +14,7 @@ import { grantPromptUnlock, grantAdFree, handleDepositTopUp } from '../services/
 import { activateSubscriptionFromToken, cancelActiveSubscription } from '../services/payments/subscriptions.service.js';
 import { isDepositProduct, isAdFreeProduct } from '../services/payments/products.js';
 import { PRODUCT_TO_PLAN } from '../services/payments/plans.js';
+import { getWallet } from '../services/wallet.service.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { parsePaging } from '../utils/paging.js';
 import { httpError } from '../utils/http-error.js';
@@ -107,6 +108,20 @@ router.delete('/subscriptions', moneyLimiter, async (req, res, next) => {
     const result = await cancelActiveSubscription(req.userId);
     if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * GET /payments/wallet — the signed-in user's multi-balance wallet breakdown:
+ * earnings (withdrawable), deposits (own money), bonus (expiring credits).
+ * Returns per-balance amounts, type metadata, and bonus vintages for the UI.
+ */
+router.get('/wallet', async (req, res, next) => {
+  try {
+    const wallet = await getWallet(req.userId);
+    return res.json(wallet);
   } catch (err) {
     return next(err);
   }

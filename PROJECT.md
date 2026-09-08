@@ -63,6 +63,7 @@ src/
     firestoreRepo.js         # Data-access layer: queryAll, findByPk, upsert, batch/tx helpers, COLS map
     config.js                # Re-exports db + runTransaction() + pingDb() (used by routes & payments)
     seed.js                  # npm run db:seed — idempotent starter data (plans, demo prompts)
+    migrate-wallets.js       # npm run db:migrate-wallets — one-time user_balances → user_wallets
   lib/playBilling.js         # Google Play Billing client + purchase/acknowledge/fee helpers
   middleware/
     auth.js                  # requireAuth / optionalAuth (Firebase ID-token verify + dev fallback)
@@ -79,15 +80,19 @@ src/
     image-watermark.service.js # sharp watermark for paid prompt covers (admin wordmark)
     image-moderation.service.js # Google Vision SafeSearch → refuse adult/racy on user uploads
     bulk-prompts.service.js  # Admin bulk ZIP/CSV import (validate → upload images → batch writes)
-    ledger.js                # user_balances running balance + writeLedger() helpers
-    earnings.service.js      # Creator earnings aggregation from prompt_purchases
+    ledger.js                # Legacy user_balances running balance + writeLedger() helpers
+    wallet.service.js        # ★ Multi-balance wallet: get/credit/debit, FEFO bonus vintages, deposit top-up split, expiry sweep
+    earnings.service.js      # Creator earnings aggregation (wallet-backed)
     rtdn.service.js          # Play Billing RTDN → idempotent log → dispatch by event
     payments/
-      playBilling.service.js # grantPromptUnlock (paid prompt unlock, gross credit)
+      balance-types.js       # ★ BALANCE_TYPES: earnings / deposits / bonus + spend rules & priority
+      playBilling.service.js # verify+grant: prompt unlock (gross credit to wallet), ad-free, deposit top-up (net→deposits, fee→bonus)
       subscriptions.service.js # Play Billing token activation + cancel + RTDN lifecycle
-      payouts.service.js     # Manual-settle withdrawals (request/list/mark paid/failed, eligibility)
+      payouts.service.js     # Manual-settle withdrawals (wallet earnings as source of truth)
       plans.js               # BUILTIN_PLANS fallback + plan lookups
       subscription-utils.js  # active-subscription + fee helpers
+  scripts/
+    expireBonus.js           # npm run wallet:expire — daily bonus vintage expiry sweep
   utils/
     http-error.js            # httpError(status, message)
     paging.js                # parsePaging — limit (≤100, default 50) + offset clamps
@@ -162,7 +167,8 @@ Bearer token, **✅+admin** = required token + admin email.
 ### Payments (Google Play Billing)
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/payments/playbilling/verify` | ✅ | Body `{ productId, purchaseToken, isSubscription? }` → verify Play Billing token + grant. `prompt_<id>` unlocks a prompt (buyer pays price + 5% transaction fee, creator credited gross). `pro` / `pro_annual` / `creator` / `creator_annual` activate subscriptions (+ ad-free perk). `ad_free` grants one-time ad-free. `deposit_s/m/l/xl` credit a deposit top-up (net after gateway fee). |
+| POST | `/payments/playbilling/verify` | ✅ | Body `{ productId, purchaseToken, isSubscription? }` → verify Play Billing token + grant. `prompt_<id>` unlocks a prompt (buyer pays price + 5% transaction fee, creator credited **gross** to wallet `earnings`). `pro` / `pro_annual` / `creator` / `creator_annual` activate subscriptions (+ ad-free perk). `ad_free` grants one-time ad-free. `deposit_s/m/l/xl` credit a deposit top-up (**net** after gateway fee → `deposits`, fee recycled as `bonus`). |
+| GET | `/payments/wallet` | ✅ | Wallet breakdown: `balances` (earnings / deposits / bonus with amounts + spend rules), `totalBalanceInr`, `bonusVintages` (per-credit remaining + expiry) |
 | DELETE | `/payments/subscriptions` | ✅ | Cancel active subscription (user also cancels in Play Store) |
 | GET | `/payments/payouts/eligibility` | ✅ | Withdrawable balance, min withdrawal, eligible + blockers |
 | GET | `/payments/payouts` | ✅ | User's payout history |
@@ -198,10 +204,11 @@ source of truth in `src/db/firestoreRepo.js` (`COLS`).
 | `user_subscriptions` | A user's Play Billing subscription (one active). `gatewaySubscriptionId` = purchase token. Status: `active/cancelled/expired` |
 | `prompts` | Marketplace prompts: `authorId, title, description, promptText, imageUrl, images[], category, tags, isPaid, priceInr, status, viewCount, saveCount, createdAt` |
 | `prompt_purchases` | One unlock per buyer per prompt. Deterministic id `(buyerId, promptId)`. Freezes `priceInr` (gross) + `buyerPaysInr` (+5% tx fee) + `gatewayFeeInr` (commission, tracked only) |
-| `transactions` | Ledger rows (every credit/debit) — drives `/me/transactions` |
+| `transactions` | Ledger rows (every credit/debit, `balanceType` = which bucket) — drives `/me/transactions` and the wallet audit trail |
+| `user_wallets` | ★ Multi-balance wallet, id = user id. `earnings` (withdrawable) / `deposits` (own money) / `bonus` (spend-capped + expiring), plus `bonusVintages` map for per-credit FEFO expiry |
 | `payouts` | Withdrawal requests. Status: `pending / processing / paid / failed` |
 | `saved_prompts` | Join table. Id `(userId, promptId)` |
-| `user_balances` | Running INR balance per user (integer rupees) |
+| `user_balances` | **Legacy** running INR balance per user — superseded by `user_wallets` (migrated via `npm run db:migrate-wallets`) |
 | `user_posts` | Daily post-count tracking for the plan gate |
 | `bank_accounts` | Creator bank transfer details (payout) |
 | `kyc_verifications` | KYC image references |
@@ -231,7 +238,7 @@ Paid prompts   Buyer ──(₹ = price + 5% tx fee)───────► Pla
                                                         │  creator credited GROSS = full price
                                                         │  buyer's +5% = app income (never credited)
                                                         ▼
-                                                 Creator balance (user_balances)
+                                                 Creator wallet  (earnings bucket)
                                                         │  withdraw (min ₹60) → deduct withdrawal fee
                                                         │    (15% Pro / 5% Creator) — only fee at payout
                                                         │  admin transfers via OWN bank app
@@ -254,7 +261,13 @@ Paid prompts   Buyer ──(₹ = price + 5% tx fee)───────► Pla
   a solo individual cannot create a payout route. Hence: creator requests → `payouts` row
   `pending` + balance reserved (ledger debit) → dev transfers from their own bank → admin marks
   `paid`. `mark-failed` reverses the reservation.
-- Creator earnings are **full gross** at sale; the withdrawal fee is applied only at payout.
+- Creator earnings are **full gross** at sale — credited to the wallet `earnings` bucket; the
+  withdrawal fee is applied only at payout.
+- **Deposit top-ups** credit `net` (price − gateway fee) to the wallet `deposits` bucket and
+  recycle the gateway fee as a **bonus** vintage. Bonus is spend-capped (10% of item price),
+  expires per-credit in 90 days (FEFO — oldest first), and is never withdrawable.
+- **Payouts** debit the wallet `earnings` bucket (action: reserve); `mark-paid`/`mark-failed`
+  are pure bookkeeping (reversal credits `earnings` back on failure).
 - Webhooks are **idempotent**: a dedupe key (hash of event+payload) makes replays no-ops, so a
   doubled delivery can't double-charge.
 
@@ -358,8 +371,10 @@ response.
 npm install
 copy .env.example .env      # then set FIREBASE_PROJECT_ID + creds (or emulator)
 npm run db:seed             # once — starter plans + demo prompts
+npm run db:migrate-wallets  # once — migrate legacy user_balances → user_wallets
+npm run wallet:expire       # daily — bonus vintage expiry sweep (or via Cloud Scheduler)
 npm run dev                 # http://localhost:8080, hot reload
-npm test                    # node:test unit tests (25 tests, no framework dep)
+npm test                    # node:test unit tests (20 tests, no framework dep)
 ```
 
 The Firebase emulator is supported via `FIRESTORE_EMULATOR_HOST`. Tests only exercise pure /

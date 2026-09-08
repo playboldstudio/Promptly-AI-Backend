@@ -11,6 +11,8 @@
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "db:seed": "node src/db/seed.js",
+    "db:migrate-wallets": "node src/db/migrate-wallets.js",
+    "wallet:expire": "node src/scripts/expireBonus.js",
     "test": "node --test"
   },
   "dependencies": {
