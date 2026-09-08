@@ -12,7 +12,8 @@
 
 **Promptly AI** is an **AI-prompt marketplace**: creators publish text prompts (with a cover
 image), browse/save/trend prompts, and monetize via subscriptions and paid per-prompt unlocks.
-Creators can withdraw earnings (manual settle). Payments are routed through **Razorpay**.
+Creators can withdraw earnings (manual settle). Payments are routed through **Google Play
+Billing**.
 
 The **backend** is a **Node.js + Express 4** HTTP API (plain JavaScript, ESM, no build step)
 that talks to **Firebase Firestore** (the datastore) and **Firebase Authentication** (identity),
@@ -23,7 +24,7 @@ serves user-uploaded images from **Google Cloud Storage**, and is deployed to **
 Mobile/Web UI ──HTTPS──► Cloud Run (this API) ──► Firebase Auth (ID tokens)
                                          ──► Firestore (data)
                                          ──► Cloud Storage (images, public)
-                                         ──► Razorpay (orders/subscriptions/webhooks)
+                                         ──► Google Play Billing (in-app purchases/subs, RTDN)
                                          ──► Google Cloud Vision (NSFW moderation)
 ```
 
@@ -37,7 +38,7 @@ Mobile/Web UI ──HTTPS──► Cloud Run (this API) ──► Firebase Auth 
 | Framework | Express 4 |
 | Database | Firebase Firestore (Native) via `firebase-admin` |
 | Auth | Firebase Auth (Admin SDK verifies client ID tokens) |
-| Payments | Razorpay (orders, subscriptions, webhooks, HMAC signatures) |
+| Payments | Google Play Billing (purchases, subscriptions, RTDN webhooks) |
 | Image processing | `sharp` (watermarking), `adm-zip` (bulk ZIP), `@google-cloud/vision` (moderation) |
 | Validation | `zod` (env + request bodies) |
 | Middleware | `helmet`, `cors`, `morgan`, `multer`, custom rate limiter |
@@ -55,21 +56,21 @@ run `npm run db:seed` once to create the starter subscription plans + demo promp
 src/
   server.js                  # Entrypoint: binds 0.0.0.0 on PORT (default 8080), graceful shutdown
   app.js                     # Express assembly: helmet, cors, raw body for webhooks, json, routers
-  config/env.js              # zod-validated environment + admin email + razorpay plan-id helpers
+  config/env.js              # zod-validated environment + admin email + play-billing helpers
   config/urls.js             # single API base URL (PUBLIC_BASE_URL / CORS origins)
   db/
     firestore.js             # Firebase Admin init (Firestore + Auth), toTimestamp helpers, pingDb
     firestoreRepo.js         # Data-access layer: queryAll, findByPk, upsert, batch/tx helpers, COLS map
     config.js                # Re-exports db + runTransaction() + pingDb() (used by routes & payments)
     seed.js                  # npm run db:seed — idempotent starter data (plans, demo prompts)
-  lib/razorpay.js            # Lazily-created Razorpay client + HMAC signature verifiers
+  lib/playBilling.js         # Google Play Billing client + purchase/acknowledge/fee helpers
   middleware/
     auth.js                  # requireAuth / optionalAuth (Firebase ID-token verify + dev fallback)
     errorHandler.js          # Converts errors to {error:{message,code}}; 5xx → generic "Internal server error"
     notFound.js              # 404 handler
     rateLimit.js             # In-memory per-IP/uid sliding-window limiter
   routes/                    # HTTP layer — thin; validates input, delegates to services
-    health.js  auth.js  prompts.js  me.js  admin-prompts.js  payments.js  webhooks.js
+    health.js  auth.js  prompts.js  me.js  admin-prompts.js  payments.js  rtdn.js
   services/                  # Business logic + all Firestore/Storage reads & writes
     prompts.service.js       # list/detail/save/unsave/create/delete prompts, daily-post gate
     prompt-metrics.js        # Derived isTrending / isNew flags
@@ -80,10 +81,10 @@ src/
     bulk-prompts.service.js  # Admin bulk ZIP/CSV import (validate → upload images → batch writes)
     ledger.js                # user_balances running balance + writeLedger() helpers
     earnings.service.js      # Creator earnings aggregation from prompt_purchases
-    webhooks.service.js      # Razorpay webhook verify → idempotent log → dispatch by event
+    rtdn.service.js          # Play Billing RTDN → idempotent log → dispatch by event
     payments/
-      checkout.service.js    # createCheckoutOrder / verifyAndUnlock (paid prompt unlock)
-      subscriptions.service.js # create / cancel active subscription
+      playBilling.service.js # grantPromptUnlock (paid prompt unlock, gross credit)
+      subscriptions.service.js # Play Billing token activation + cancel + RTDN lifecycle
       payouts.service.js     # Manual-settle withdrawals (request/list/mark paid/failed, eligibility)
       plans.js               # BUILTIN_PLANS fallback + plan lookups
       subscription-utils.js  # active-subscription + fee helpers
@@ -158,13 +159,11 @@ Bearer token, **✅+admin** = required token + admin email.
 | POST | `/me/avatar` | ✅ | Upload profile picture (raw `image/*` body) |
 | DELETE | `/me/account` | ✅ | Delete account (soft-delete) |
 
-### Payments (Razorpay)
+### Payments (Google Play Billing)
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/payments/checkout/order` | ✅ | Body `{ promptId }` → create Razorpay order for a paid prompt |
-| POST | `/payments/checkout/verify` | ✅ | Body = Razorpay success payload `{ promptId, orderId, paymentId, signature }` → verify + unlock |
-| POST | `/payments/subscriptions` | ✅ | Body `{ planId: "pro"|"creator" }` → create Razorpay subscription |
-| DELETE | `/payments/subscriptions` | ✅ | Cancel active subscription (current paid period stays) |
+| POST | `/payments/playbilling/verify` | ✅ | Body `{ productId, purchaseToken, isSubscription? }` → verify Play Billing token + grant. `prompt_<id>` unlocks a prompt (buyer pays price + 5% transaction fee, creator credited gross). `pro` / `pro_annual` / `creator` / `creator_annual` activate subscriptions (+ ad-free perk). `ad_free` grants one-time ad-free. `deposit_s/m/l/xl` credit a deposit top-up (net after gateway fee). |
+| DELETE | `/payments/subscriptions` | ✅ | Cancel active subscription (user also cancels in Play Store) |
 | GET | `/payments/payouts/eligibility` | ✅ | Withdrawable balance, min withdrawal, eligible + blockers |
 | GET | `/payments/payouts` | ✅ | User's payout history |
 | POST | `/payments/payouts` | ✅ | Request withdrawal. Body `{ amountInr }` (manual settle, min `MIN_WITHDRAWAL_INR`) |
@@ -181,7 +180,7 @@ Bearer token, **✅+admin** = required token + admin email.
 ### Webhooks
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/webhooks/razorpay` | HMAC | Verify `X-Razorpay-Signature`, log idempotently (dedupe), dispatch `subscription.charged` / `.cancelled` / `.expired` |
+| POST | `/webhooks/google/rtdn` | – | Play Billing RTDN. Parse Pub/Sub message, verify subscription id, log idempotently (dedupe doc id), dispatch subscription lifecycle (`SUBSCRIPTION_RENEWED` / `CANCELED` / `EXPIRED`). Always 200. |
 
 All money-mutating/`login` routes are rate-limited (in-memory per-IP/uid).
 
@@ -194,11 +193,11 @@ source of truth in `src/db/firestoreRepo.js` (`COLS`).
 
 | Collection | Purpose / shape |
 |---|---|
-| `users` | id = Firebase UID. `email, fullName, avatarUrl, role, upiId, ...`, soft-delete via `deleted` |
-| `subscription_plans` | `free` / `pro` / `creator` plans (seeded). Gates daily post limit & `canPostPaid` |
-| `user_subscriptions` | A user's Razorpay subscription (one active). Status: `active/inactive/cancelled/...` |
+| `users` | id = Firebase UID. `email, fullName, avatarUrl, role, upiId, adFree, ...`, soft-delete via `deleted` |
+| `subscription_plans` | `free` / `pro` / `pro_annual` / `creator` / `creator_annual` plans (seeded). Gates daily post limit & `canPostPaid`; carries `platformFeePercent` (withdrawal fee: Pro 15%, Creator 5%) and `perks` array (e.g. `ad_free`) |
+| `user_subscriptions` | A user's Play Billing subscription (one active). `gatewaySubscriptionId` = purchase token. Status: `active/cancelled/expired` |
 | `prompts` | Marketplace prompts: `authorId, title, description, promptText, imageUrl, images[], category, tags, isPaid, priceInr, status, viewCount, saveCount, createdAt` |
-| `prompt_purchases` | One unlock per buyer per prompt. Deterministic id `(buyerId, promptId)`. Freezes `priceInr / platformFeeInr / netInr` |
+| `prompt_purchases` | One unlock per buyer per prompt. Deterministic id `(buyerId, promptId)`. Freezes `priceInr` (gross) + `buyerPaysInr` (+5% tx fee) + `gatewayFeeInr` (commission, tracked only) |
 | `transactions` | Ledger rows (every credit/debit) — drives `/me/transactions` |
 | `payouts` | Withdrawal requests. Status: `pending / processing / paid / failed` |
 | `saved_prompts` | Join table. Id `(userId, promptId)` |
@@ -206,7 +205,7 @@ source of truth in `src/db/firestoreRepo.js` (`COLS`).
 | `user_posts` | Daily post-count tracking for the plan gate |
 | `bank_accounts` | Creator bank transfer details (payout) |
 | `kyc_verifications` | KYC image references |
-| `webhook_events` | Razorpay webhook idempotency/dedupe |
+| `webhook_events` | Play Billing RTDN idempotency/dedupe |
 
 **Key invariants enforced in the service layer:**
 - One unlock per buyer per prompt (deterministic id prevents double-purchase).
@@ -224,26 +223,38 @@ manually with `gcloud firestore indexes composite create --database=<db> ...` pe
 
 ---
 
-## 7. Money & payouts model (manual settle)
+## 7. Money & payouts model (manual settle, two-fee model)
 
 ```
-Subscriptions  Buyer ──(recurring, Razorpay)──────────► Platform
-Paid prompts   Buyer ──(₹, Razorpay Checkout)────────► Platform pool
-                                                        │  net = price × (100 − fee%) / 100
+Subscriptions  Buyer ──(₹/mo, Play Billing)──────────► Platform (recurring)
+Paid prompts   Buyer ──(₹ = price + 5% tx fee)───────► Platform (one-time)
+                                                        │  creator credited GROSS = full price
+                                                        │  buyer's +5% = app income (never credited)
                                                         ▼
                                                  Creator balance (user_balances)
-                                                        │  withdraw (min ₹60) → payout request (pending)
+                                                        │  withdraw (min ₹60) → deduct withdrawal fee
+                                                        │    (15% Pro / 5% Creator) — only fee at payout
                                                         │  admin transfers via OWN bank app
                                                         ▼
                                                  Creator's bank account (manual)
 ```
 
-- **Why manual:** RazorpayX Payouts (automatic third-party bank transfer) is business-only, so
+**Fees (see `plans/withdrawals.md` for the full model):**
+- **5% buyer transaction fee** — charged on every paid prompt purchase (buyer pays
+  `price + 5%`). This is app income and is never credited to any user.
+- **Withdrawal (platform) fee** — deducted when the creator initiates a payout:
+  **15%** (Pro seller) / **5%** (Creator seller). This is the *only* deduction at
+  payout time.
+- **Play Billing commission** (~15%) — Google's cut, absorbed by the platform at
+  payment time. Tracked on `prompt_purchases.gatewayFeeInr` for reconciliation but
+  never deducted at withdrawal.
+
+- **Why manual:** Automatic third-party bank transfers are business-only (require a business
+  entity), so
   a solo individual cannot create a payout route. Hence: creator requests → `payouts` row
   `pending` + balance reserved (ledger debit) → dev transfers from their own bank → admin marks
   `paid`. `mark-failed` reverses the reservation.
-- Fees: e.g. platform fee (Pro 5%, Creator 0%) plus Razorpay + GST on withdrawals, computed to
-  2-decimal integer precision.
+- Creator earnings are **full gross** at sale; the withdrawal fee is applied only at payout.
 - Webhooks are **idempotent**: a dedupe key (hash of event+payload) makes replays no-ops, so a
   doubled delivery can't double-charge.
 
@@ -280,14 +291,18 @@ Paid prompts   Buyer ──(₹, Razorpay Checkout)────────► P
 | `FIREBASE_CLIENT_EMAIL` / `FIREBASE_PRIVATE_KEY` | Service-account creds (or `GOOGLE_APPLICATION_CREDENTIALS`) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to SA key for local dev |
 | `STORAGE_BUCKET` | Cloud Storage bucket for images |
-| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | Razorpay keys (test in dev) |
-| `RAZORPAY_WEBHOOK_SECRET` | Webhook HMAC secret |
-| `RAZORPAY_PLAN_PRO_ID` / `RAZORPAY_PLAN_CREATOR_ID` | Razorpay subscription plan ids |
+| `PLAY_BILLING_PACKAGE_NAME` | Android package name for Play Billing verification |
+| `GOOGLE_CLOUD_PROJECT` | GCP project for Play Billing (used by `googleapis`) |
+| `RTDN_TOPIC` | Cloud Pub/Sub topic for Play Billing RTDN notifications |
+| `RTDN_SUBSCRIPTION` | Pub/Sub subscription id for RTDN push endpoint |
 | `PUBLIC_BASE_URL` | Canonical API base URL (CORS + urls.js) |
 | `CORS_ORIGINS` | Extra allowed origins |
 | `ADMIN_EMAILS` | Comma-separated admin emails (payout/import back-office) |
 | `DEV_AUTH_PASSWORD` | Dev-only password fallback (never in prod) |
 | `MIN_WITHDRAWAL_INR` | Minimum withdrawal (default 60) |
+| `DEPOSIT_MIN_INR` / `DEPOSIT_MAX_INR` | Deposit pack bounds (default 10 / 10000) |
+| `BONUS_EXPIRY_DAYS` | Bonus credit expiry (default 90) |
+| `PLAY_BILLING_FEE_TOLERANCE_INR` | Reconciliation tolerance (default 0.01) |
 
 **Security hygiene:** never commit `.env` or service-account key files (gitignored). On Cloud Run,
 secret values are pulled from Secret Manager at deploy time.
@@ -301,10 +316,10 @@ Deploys are **manual** — there is no CI/CD; push to GitHub does not auto-deplo
 Two Cloud Run services in project `playbold-promptly-prod` (region `us-west1`), both run as the
 same service account and preserve their own env/secrets on deploy:
 
-- **LIVE** service `promptly-ai-backend-git` — Firestore DB `promptly-ai`, **live** Razorpay keys,
-  CORS locked to the production web app. Run: `gcloud run deploy promptly-ai-backend-git --source . --region us-west1`.
-- **DEV** service `promptly-ai-backend-dev` — Firestore DB `promptly-dev`, **dev/test** Razorpay
-  keys, `DEV_AUTH_PASSWORD` set. Run: `gcloud run deploy promptly-ai-backend-dev --source . --region us-west1`.
+- **LIVE** service `promptly-ai-backend-git` — Firestore DB `promptly-ai`, CORS locked to the
+  production web app. Run: `gcloud run deploy promptly-ai-backend-git --source . --region us-west1`.
+- **DEV** service `promptly-ai-backend-dev` — Firestore DB `promptly-dev`, `DEV_AUTH_PASSWORD` set.
+  Run: `gcloud run deploy promptly-ai-backend-dev --source . --region us-west1`.
 
 Both use `--timeout 300` (5-minute request budget) for the bulk-upload path. A manual
 `--source .` deploy preserves existing env/secret bindings (no env flags needed). See
@@ -316,9 +331,10 @@ Both use `--timeout 300` (5-minute request budget) for the bulk-upload path. A m
 2. Apply composite indexes + Firestore security rules (`firestore.indexes.json` / `firestore.rules`,
    deny-all for direct client access — the backend uses the Admin SDK which bypasses rules).
 3. `npm run db:seed` once to create the starter plans + demo prompts.
-4. Create Secret Manager secrets for Razorpay keys, webhook secret, SA creds, plan ids; wire via
-   `--set-secrets`.
-5. Point the Razorpay webhook at `https://<service-url>/webhooks/razorpay`.
+4. Create Secret Manager secrets for SA creds; wire via `--set-secrets`.
+5. Set `PLAY_BILLING_PACKAGE_NAME` and `RTDN_SUBSCRIPTION` env vars on the Cloud Run service.
+6. Create a Cloud Pub/Sub **push** subscription for the Play Billing RTDN topic pointing at
+   `https://<service-url>/webhooks/google/rtdn`.
 
 **Post-merge deploy flow:** pull/merge to `master` → `gcloud run deploy` dev (and live when ready).
 

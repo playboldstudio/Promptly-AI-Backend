@@ -40,11 +40,11 @@ gcloud run deploy "$SERVICE" \
   --min-instances 0 \
   --max-instances 5 \
   --timeout 300 \
-  --set-env-vars "NODE_ENV=production,FIREBASE_PROJECT_ID=${PROJECT_ID},FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-}" \
+  --set-env-vars "NODE_ENV=production,FIREBASE_PROJECT_ID=${PROJECT_ID},FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-},PLAY_BILLING_PACKAGE_NAME=${PLAY_BILLING_PACKAGE_NAME:-},RTDN_SUBSCRIPTION=${RTDN_SUBSCRIPTION:-}" \
   --set-secrets \
-    "RAZORPAY_KEY_ID=razorpay-key-id:latest,RAZORPAY_KEY_SECRET=razorpay-key-secret:latest,RAZORPAY_WEBHOOK_SECRET=razorpay-webhook-secret:latest,FIREBASE_CLIENT_EMAIL=firebase-client-email:latest,FIREBASE_PRIVATE_KEY=firebase-private-key:latest,RAZORPAY_PLAN_PRO_ID=razorpay-plan-pro:latest,RAZORPAY_PLAN_CREATOR_ID=razorpay-plan-creator:latest"
+    "FIREBASE_CLIENT_EMAIL=firebase-client-email:latest,FIREBASE_PRIVATE_KEY=firebase-private-key:latest"
 
 URL=$(gcloud run services describe "$SERVICE" --region "$REGION" --format 'value(status.url)')
 echo
 echo "Deployed: $URL"
-echo "Set PUBLIC_BASE_URL=$URL and point the Android client + Razorpay webhook ($URL/webhooks/razorpay) at it."
+echo "Set PUBLIC_BASE_URL=$URL and point the Play Billing RTDN Pub/Sub subscription at $URL/webhooks/google/rtdn."

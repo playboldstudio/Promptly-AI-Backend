@@ -16,12 +16,10 @@ const envSchema = z.object({
   GOOGLE_APPLICATION_CREDENTIALS: z.string().optional().default(''),
   STORAGE_BUCKET: z.string().optional().default(''),
 
-  RAZORPAY_KEY_ID: z.string().optional().default(''),
-  RAZORPAY_KEY_SECRET: z.string().optional().default(''),
-  RAZORPAY_WEBHOOK_SECRET: z.string().optional().default(''),
-
-  RAZORPAY_PLAN_PRO_ID: z.string().optional().default(''),
-  RAZORPAY_PLAN_CREATOR_ID: z.string().optional().default(''),
+  PLAY_BILLING_PACKAGE_NAME: z.string().optional().default(''),
+  GOOGLE_CLOUD_PROJECT: z.string().optional().default(''),
+  RTDN_TOPIC: z.string().optional().default(''),
+  RTDN_SUBSCRIPTION: z.string().optional().default(''),
 
   PUBLIC_BASE_URL: z.string().optional().default(''),
   CORS_ORIGINS: z.string().optional().default(''),
@@ -31,6 +29,11 @@ const envSchema = z.object({
   DEV_AUTH_PASSWORD: z.string().optional().default(''),
 
   MIN_WITHDRAWAL_INR: z.coerce.number().int().positive().default(60),
+
+  DEPOSIT_MIN_INR: z.coerce.number().int().positive().default(10),
+  DEPOSIT_MAX_INR: z.coerce.number().int().positive().default(10000),
+  BONUS_EXPIRY_DAYS: z.coerce.number().int().positive().default(90),
+  PLAY_BILLING_FEE_TOLERANCE_INR: z.coerce.number().positive().default(0.01),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -56,13 +59,5 @@ export function isAdminEmail(email) {
   return Boolean(email && ADMIN_EMAILS.includes(email));
 }
 
-export const hasRazorpayKeys = Boolean(env.RAZORPAY_KEY_ID && env.RAZORPAY_KEY_SECRET);
-
-export const RAZORPAY_PLAN_BY_ID = {
-  pro: env.RAZORPAY_PLAN_PRO_ID,
-  creator: env.RAZORPAY_PLAN_CREATOR_ID,
-};
-
-export function razorpayPlanIdFor(planId) {
-  return RAZORPAY_PLAN_BY_ID[planId] ?? '';
-}
+/** True when Play Billing is configured (package name set). */
+export const hasPlayBilling = Boolean(env.PLAY_BILLING_PACKAGE_NAME);

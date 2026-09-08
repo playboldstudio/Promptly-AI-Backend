@@ -18,15 +18,6 @@
       ]
     },
     {
-      "collectionGroup": "user_subscriptions",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "razorpaySubId", "order": "ASCENDING" },
-        { "fieldPath": "status", "order": "ASCENDING" },
-        { "fieldPath": "createdAt", "order": "DESCENDING" }
-      ]
-    },
-    {
       "collectionGroup": "payouts",
       "queryScope": "COLLECTION",
       "fields": [

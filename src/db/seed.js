@@ -8,9 +8,11 @@ import { COLS, findByPk, upsert } from '../db/firestoreRepo.js';
  */
 
 const PLANS = [
-  { id: 'free', name: 'Free', priceInr: 0, billingCycle: 'monthly', dailyPostLimit: 3, canPostPaid: false, platformFeePercent: 0 },
-  { id: 'pro', name: 'Pro', priceInr: 49, billingCycle: 'monthly', dailyPostLimit: null, canPostPaid: true, platformFeePercent: 5 },
-  { id: 'creator', name: 'Creator', priceInr: 99, billingCycle: 'monthly', dailyPostLimit: null, canPostPaid: true, platformFeePercent: 0 },
+  { id: 'free', name: 'Free', priceInr: 0, billingCycle: 'monthly', dailyPostLimit: 3, canPostPaid: false, platformFeePercent: 0, perks: [] },
+  { id: 'pro', name: 'Pro', priceInr: 99, billingCycle: 'monthly', dailyPostLimit: null, canPostPaid: true, platformFeePercent: 15, perks: ['ad_free'] },
+  { id: 'pro_annual', name: 'Pro (Annual)', priceInr: 999, billingCycle: 'annual', dailyPostLimit: null, canPostPaid: true, platformFeePercent: 15, perks: ['ad_free'] },
+  { id: 'creator', name: 'Creator', priceInr: 199, billingCycle: 'monthly', dailyPostLimit: null, canPostPaid: true, platformFeePercent: 5, perks: ['ad_free'] },
+  { id: 'creator_annual', name: 'Creator (Annual)', priceInr: 1999, billingCycle: 'annual', dailyPostLimit: null, canPostPaid: true, platformFeePercent: 5, perks: ['ad_free'] },
 ];
 
 const DEMO_USER_ID = 'demo_creator';

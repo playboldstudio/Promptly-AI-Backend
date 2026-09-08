@@ -6,12 +6,6 @@ import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 
 const MIN_WITHDRAWAL_INR = env.MIN_WITHDRAWAL_INR;
 
-/** Flat Razorpay UPI-transfer fee charged on every withdrawal. */
-const RAZORPAY_FEE_PERCENT = 2;
-
-/** GST levied on the Razorpay fee (18% of the 2%). */
-const RAZORPAY_GST_PERCENT = 18;
-
 function err(status, message) {
   return { error: { status, message } };
 }
@@ -40,20 +34,19 @@ function bankDetailsComplete(user) {
 }
 
 /**
- * Fee breakdown for a withdrawal. Fees are DEDUCTED from the requested amount:
- * 2% Razorpay UPI fee + 18% GST on that fee + the plan's platform fee. Every
- * value is kept to 2 decimal places (paise precision) — no whole-rupee rounding.
- * The admin pays `netInr` to the creator's UPI, the platform keeps the rest.
- * `platformFeePercent` comes from the creator's plan (Pro=5%, Creator=0%).
+ * Fee breakdown for a withdrawal. The ONLY deduction is the seller's platform
+ * fee — 15% (Pro seller) / 5% (Creator seller) — taken when the creator
+ * initiates a payout. The Play Billing commission was absorbed by the platform
+ * at payment time and the 5% buyer transaction fee was app income at purchase;
+ * neither is re-deducted here (see plans/withdrawals.md).
+ *
+ * Every value is kept to 2 decimal places (paise precision). The admin pays
+ * `netInr` to the creator's bank, the platform keeps the rest.
  */
 function payoutFees(amountInr, platformFeePercent = 0) {
-  const razorpayFeeInr = toMoney((amountInr * RAZORPAY_FEE_PERCENT) / 100);
-  const gstInr = toMoney((razorpayFeeInr * RAZORPAY_GST_PERCENT) / 100);
   const platformFeeInr = toMoney((amountInr * (platformFeePercent || 0)) / 100);
-  const feeInr = toMoney(razorpayFeeInr + gstInr + platformFeeInr);
+  const feeInr = platformFeeInr;
   return {
-    razorpayFeeInr,
-    gstInr,
     platformFeeInr,
     feeInr,
     netInr: toMoney(amountInr - feeInr),
@@ -120,14 +113,11 @@ export async function withdrawalEligibility(userId) {
     hasPaidPlan,
     meetsMinimum,
     currency: 'INR',
-    razorpayFeePercent: RAZORPAY_FEE_PERCENT,
-    razorpayGstPercent: RAZORPAY_GST_PERCENT,
     platformFeePercent,
     estimatedFeeInr: fees.feeInr,
-    estimatedRazorpayFeeInr: fees.razorpayFeeInr,
-    estimatedGstInr: fees.gstInr,
     estimatedPlatformFeeInr: fees.platformFeeInr,
     estimatedNetInr: fees.netInr,
+    netIfWithdrawNow: fees.netInr,
   };
 }
 
@@ -149,7 +139,7 @@ export async function requestPayout({ userId, amountInr }) {
     return err(403, 'Subscriber only — upgrade to Pro or Creator before withdrawing');
   }
 
-  // Fee breakdown: 2% Razorpay + the plan's platform fee, deducted from payout.
+  // Fee breakdown: only the plan's withdrawal (platform) fee, deducted from payout.
   const fees = payoutFees(amountInr, sub?.plan?.platformFeePercent ?? 0);
 
   // GATE 2 — the creator needs a saved bank-transfer destination + KYC docs.
@@ -214,10 +204,6 @@ export async function requestPayout({ userId, amountInr }) {
         bankAccountNumber: user.bankAccountNumber ?? null,
         bankIfsc: user.bankIfsc ?? null,
         bankBranch: user.bankBranch ?? null,
-        razorpayPayoutId: null,
-        bankAccountId: null,
-        razorpayFeeInr: fees.razorpayFeeInr,
-        gstInr: fees.gstInr,
         platformFeeInr: fees.platformFeeInr,
         feeInr: fees.feeInr,
         netInr: fees.netInr,
@@ -237,7 +223,7 @@ export async function requestPayout({ userId, amountInr }) {
           direction: 'debit',
           amountInr,
           refId: ref.id,
-          note: `Withdrawal — ₹${amountInr} minus ₹${fees.feeInr} fees (2% Razorpay + 18% GST${fees.platformFeeInr ? ` + ${sub?.plan?.platformFeePercent ?? 0}% platform` : ''}), ${fees.netInr} to bank`,
+          note: `Withdrawal — ₹${amountInr} minus ₹${fees.feeInr} withdrawal fee (${sub?.plan?.platformFeePercent ?? 0}%), ₹${fees.netInr} to bank`,
           balanceInr: bal,
         },
       );
@@ -257,8 +243,6 @@ export async function requestPayout({ userId, amountInr }) {
         bankAccountNumber: payout.bankAccountNumber,
         bankIfsc: payout.bankIfsc,
         bankBranch: payout.bankBranch,
-        razorpayFeeInr: payout.razorpayFeeInr,
-        gstInr: payout.gstInr,
         platformFeeInr: payout.platformFeeInr,
         feeInr: payout.feeInr,
         netInr: payout.netInr,

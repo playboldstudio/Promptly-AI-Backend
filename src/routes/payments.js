@@ -1,8 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
-import { hasRazorpayKeys, isAdminEmail } from '../config/env.js';
-import { createCheckoutOrder, verifyAndUnlock } from '../services/payments/checkout.service.js';
+import { isAdminEmail } from '../config/env.js';
 import {
   requestPayout,
   listPayouts,
@@ -11,7 +10,10 @@ import {
   markPayoutPaid,
   markPayoutFailed,
 } from '../services/payments/payouts.service.js';
-import { createSubscription, cancelActiveSubscription } from '../services/payments/subscriptions.service.js';
+import { grantPromptUnlock, grantAdFree, handleDepositTopUp } from '../services/payments/playBilling.service.js';
+import { activateSubscriptionFromToken, cancelActiveSubscription } from '../services/payments/subscriptions.service.js';
+import { isDepositProduct, isAdFreeProduct } from '../services/payments/products.js';
+import { PRODUCT_TO_PLAN } from '../services/payments/plans.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { parsePaging } from '../utils/paging.js';
 import { httpError } from '../utils/http-error.js';
@@ -21,9 +23,9 @@ const router = Router();
 // Money-mutating endpoints — throttle per user/IP to blunt abuse.
 const moneyLimiter = rateLimit({ windowMs: 60_000, max: 60, message: 'Too many payment requests — try again shortly' });
 
-// All payment routes require auth. Razorpay-keyed routes (checkout/subscriptions)
-// additionally require the keys; the manual-settle payout routes do NOT touch
-// Razorpay and must work even when the keys are unset.
+// All payment routes require auth. The manual-settle payout routes work
+// without any payment-gateway config; Play Billing verify routes rely on
+// ../lib/playBilling.js which resolves creds via ADC at call time.
 router.use(requireAuth);
 
 // Admin back-office: only emails listed in ADMIN_EMAILS may settle payouts.
@@ -36,73 +38,59 @@ function requireAdmin(req, res, next) {
   return next();
 }
 
-function requireRazorpayKeys(req, res, next) {
-  if (!hasRazorpayKeys) {
-    const err = new Error('Payments are temporarily unavailable. Please try again shortly');
-    err.status = 501;
-    return next(err);
-  }
-  return next();
-}
-
-// promptId is a Firestore doc id — seeded prompts use slugs, creator-created
-// prompts use UUIDs — so accept any non-empty string.
-const orderSchema = z.object({ promptId: z.string().min(1) });
-const verifySchema = z.object({
-  promptId: z.string().min(1),
-  orderId: z.string(),
-  paymentId: z.string(),
-  signature: z.string(),
+const playBillingVerifySchema = z.object({
+  productId: z.string().min(1),
+  purchaseToken: z.string().min(1),
+  isSubscription: z.union([z.boolean(), z.literal('true'), z.literal('false')]).optional().default(false),
 });
 
 /**
- * POST /payments/checkout/order — create a Razorpay order for a paid prompt.
- * Body: { promptId } → { orderId, amountInr, currency, feePercent, feeInr, netInr, prompt }
+ * POST /payments/playbilling/verify — verify a Play Billing purchase token and
+ * grant the entitlement. Dispatches by productId:
+ *   - prompt_<id>        → unlock prompt (buyer pays price + 5% tx fee; creator credited gross)
+ *   - pro / pro_annual / creator / creator_annual (isSubscription: true) → activate subscription + perks
+ *   - ad_free            → one-time ad-free purchase (non-consumable)
+ *   - deposit_*          → deposit top-up (consumable, fee recycled as bonus)
  */
-router.post('/checkout/order', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
+router.post('/playbilling/verify', moneyLimiter, async (req, res, next) => {
   try {
-    const parsed = orderSchema.safeParse(req.body ?? {});
-    if (!parsed.success) return next(httpError(400, 'Missing the prompt for this purchase'));
-    const result = await createCheckoutOrder({ buyerId: req.userId, promptId: parsed.data.promptId });
-    if (result.error) return next(httpError(result.error.status, result.error.message));
-    return res.json({ order: result });
-  } catch (err) {
-    return next(err);
-  }
-});
+    const parsed = playBillingVerifySchema.safeParse(req.body ?? {});
+    if (!parsed.success) return next(httpError(400, 'Missing purchase details'));
+    const { productId, purchaseToken, isSubscription } = parsed.data;
 
-/**
- * POST /payments/checkout/verify — verify the payment + unlock the prompt.
- * Body: { promptId, orderId, paymentId, signature }
- */
-router.post('/checkout/verify', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
-  try {
-    const parsed = verifySchema.safeParse(req.body ?? {});
-    if (!parsed.success) return next(httpError(400, 'Could not confirm your payment — please try again'));
-    const result = await verifyAndUnlock({ buyerId: req.userId, ...parsed.data });
-    if (result.error) return next(httpError(result.error.status, result.error.message));
-    return res.json({ success: true, unlocked: true, promptId: result.promptId });
-  } catch (err) {
-    return next(err);
-  }
-});
+    // Subscription activation (monthly or annual).
+    if (isSubscription === true || isSubscription === 'true' || PRODUCT_TO_PLAN[productId]) {
+      const result = await activateSubscriptionFromToken({
+        userId: req.userId,
+        productId,
+        purchaseToken,
+      });
+      if (result.error) return next(httpError(result.error.status, result.error.message));
+      return res.json({ verified: true, subscription: result });
+    }
 
-const subscriptionSchema = z.object({ planId: z.enum(['pro', 'creator']) });
+    // Paid prompt unlock.
+    if (productId?.startsWith('prompt_')) {
+      const result = await grantPromptUnlock({ buyerId: req.userId, productId, purchaseToken });
+      if (result.error) return next(httpError(result.error.status, result.error.message));
+      return res.json({ verified: true, ...result });
+    }
 
-/**
- * POST /payments/subscriptions — create a Razorpay subscription for a paid plan.
- * Body: { planId: "pro" | "creator" } → { subscription: { razorpaySubId, shortUrl, ... } }
- */
-router.post('/subscriptions', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
-  try {
-    const parsed = subscriptionSchema.safeParse(req.body ?? {});
-    if (!parsed.success) return next(httpError(400, 'Please choose a valid plan'));
-    const result = await createSubscription({
-      userId: req.userId,
-      planId: parsed.data.planId,
-    });
-    if (result.error) return next(httpError(result.error.status, result.error.message));
-    return res.json({ subscription: result });
+    // Ad-free (one-time, non-consumable).
+    if (isAdFreeProduct(productId)) {
+      const result = await grantAdFree({ userId: req.userId, purchaseToken });
+      if (result.error) return next(httpError(result.error.status, result.error.message));
+      return res.json({ verified: true, ...result });
+    }
+
+    // Deposit top-up (consumable).
+    if (isDepositProduct(productId)) {
+      const result = await handleDepositTopUp({ userId: req.userId, productId, purchaseToken });
+      if (result.error) return next(httpError(result.error.status, result.error.message));
+      return res.json({ verified: true, ...result });
+    }
+
+    return next(httpError(400, 'Unknown product'));
   } catch (err) {
     return next(err);
   }
@@ -110,10 +98,11 @@ router.post('/subscriptions', moneyLimiter, requireRazorpayKeys, async (req, res
 
 /**
  * DELETE /payments/subscriptions — cancel the signed-in user's active
- * subscription. Stops renewals at Razorpay; the paid current period stays
- * active until it expires. Admins get 409 (their access is permanent).
+ * subscription. Play Billing cancellations are user-initiated in the Play
+ * Store; this marks the local row cancelled (paid current period stays).
+ * Admins get 409 (their access is permanent).
  */
-router.delete('/subscriptions', moneyLimiter, requireRazorpayKeys, async (req, res, next) => {
+router.delete('/subscriptions', moneyLimiter, async (req, res, next) => {
   try {
     const result = await cancelActiveSubscription(req.userId);
     if (result.error) return next(httpError(result.error.status, result.error.message));

@@ -9,7 +9,7 @@ import promptsRouter from './routes/prompts.js';
 import adminPromptsRouter from './routes/admin-prompts.js';
 import meRouter from './routes/me.js';
 import paymentsRouter from './routes/payments.js';
-import webhooksRouter from './routes/webhooks.js';
+import rtdnRouter from './routes/rtdn.js';
 import { notFound } from './middleware/notFound.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { env } from './config/env.js';
@@ -39,9 +39,8 @@ export function createApp() {
   );
   app.use(morgan(env.NODE_ENV === 'development' ? 'dev' : 'combined'));
 
-  // Webhook route needs the RAW body for Razorpay signature verification (HMAC).
-  // Mount it BEFORE the JSON parser.
-  app.use('/webhooks/razorpay', express.raw({ type: 'application/json' }), webhooksRouter);
+  // RTDN (Play Billing) webhook — JSON body, mounted before the limiter.
+  app.use('/webhooks/google/rtdn', rtdnRouter);
 
   app.use(express.json({ limit: '1mb' }));
 

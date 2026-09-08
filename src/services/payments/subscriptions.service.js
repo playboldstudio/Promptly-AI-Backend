@@ -1,75 +1,115 @@
-import { COLS, queryAll, inTxGet, inTxSet, update } from '../../db/firestoreRepo.js';
+import { COLS, findByPk, queryAll, inTxGet, inTxSet, update } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
-import { razorpay } from '../../lib/razorpay.js';
-import { razorpayPlanIdFor } from '../../config/env.js';
+import { verifySubscription, acknowledgePurchase } from '../../lib/playBilling.js';
 import { writeLedger } from '../ledger.js';
-import { planById } from './plans.js';
+import { planById, PRODUCT_TO_PLAN } from './plans.js';
 import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
-
-const PERIOD_MONTH_MS = 30 * 24 * 60 * 60 * 1000;
 
 function err(status, message) {
   return { error: { status, message } };
 }
 
-export async function createSubscription({ userId, planId, customerDetails }) {
+/**
+ * Activate a subscription from a Play Billing purchase token.
+ *
+ * Called from POST /payments/playbilling/verify when `isSubscription` is true.
+ * Verifies the token, maps productId → plan (supports monthly + annual),
+ * grants entitlements (including subscription perks like ad-free), then
+ * acknowledges (acknowledging within 3 days prevents Google's auto-refund).
+ */
+export async function activateSubscriptionFromToken({ userId, productId, purchaseToken }) {
+  // Map Play Billing productId → internal plan id.
+  const planId = PRODUCT_TO_PLAN[productId] ?? productId;
   const plan = await planById(planId);
-  if (!plan || !plan.isActive || !plan.priceInr) {
-    return err(404, 'Plan not found');
-  }
-  if (plan.priceInr <= 0) {
-    return err(400, 'The free plan is automatic — no Razorpay subscription needed');
+  if (!plan || !plan.isActive || !plan.priceInr || plan.priceInr <= 0) {
+    return err(400, 'Unknown subscription plan');
   }
 
-  // One active subscription per user. A user on Pro who upgrades to Creator
-  // should cancel the old one first (the UI can offer that as a separate flow).
-  const existing = await queryAll({
-    collection: COLS.userSubscriptions,
-    filters: [{ field: 'userId', value: userId }, { field: 'status', value: 'active' }],
-    limit: 1,
+  const purchase = await verifySubscription({ purchaseToken });
+  // purchaseState 0 = PURCHASED / active.
+  if (!purchase || Number(purchase.purchaseState) !== 0) {
+    return err(400, 'Subscription is not active');
+  }
+
+  const docId = `sub_${purchaseToken}`;
+  const periodStart = new Date(Number(purchase.startTimeMillis) || Date.now());
+  const periodEnd = new Date(Number(purchase.expiryTimeMillis) || Date.now() + MONTH_MS);
+
+  // Determine the billing description (monthly vs annual).
+  const billingLabel = plan.billingCycle === 'annual' ? 'year' : 'month';
+
+  await runTransaction(async (tx) => {
+    const existing = await inTxGet(tx, COLS.userSubscriptions, docId);
+    const prevBalance = Number((await inTxGet(tx, COLS.userBalances, userId))?.balanceInr ?? 0);
+
+    if (existing) {
+      // Same token re-granted (renewal / retry) — roll the period forward.
+      inTxSet(tx, COLS.userSubscriptions, docId, {
+        currentPeriodStart: periodStart,
+        currentPeriodEnd: periodEnd,
+        status: 'active',
+        updatedAt: new Date(),
+      });
+      return;
+    }
+
+    inTxSet(tx, COLS.userSubscriptions, docId, {
+      userId,
+      planId: plan.id,
+      gateway: 'play_billing',
+      gatewaySubscriptionId: purchaseToken,
+      status: 'active',
+      currentPeriodStart: periodStart,
+      currentPeriodEnd: periodEnd,
+      cancelledAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // Grant subscription perks — e.g. Pro/Creator include ad-free.
+    if (plan.perks?.includes('ad_free')) {
+      const user = await inTxGet(tx, COLS.users, userId);
+      if (user && !user.adFree) {
+        inTxSet(tx, COLS.users, userId, { adFree: true, updatedAt: new Date() });
+      }
+    }
+
+    if (plan.priceInr) {
+      await writeLedger(
+        tx,
+        {
+          userId,
+          type: 'subscription_payment',
+          direction: 'debit',
+          amountInr: plan.priceInr,
+          note: `Subscription — ${plan.name} (₹${plan.priceInr}/${billingLabel})`,
+          balanceInr: prevBalance,
+        },
+      );
+    }
   });
-  if (existing.rows.length) {
-    return err(409, 'You already have an active subscription');
-  }
 
-  const razorpayPlanId = razorpayPlanIdFor(planId);
-  if (!razorpayPlanId) {
-    return err(
-      501,
-      `No Razorpay plan configured for "${planId}" — set RAZORPAY_PLAN_${planId.toUpperCase()}_ID`,
-    );
-  }
-
-  const periodEnd = Date.now() + PERIOD_MONTH_MS;
-  const subscription = await razorpay().subscriptions.create({
-    plan_id: razorpayPlanId,
-    total_count: 12, // renews monthly; webhook charges each cycle
-    quantity: 1,
-    customer_notify: 1,
-    notes: { userId },
-    // charge in the background on a schedule, not via a one-time checkout
-    ...(customerDetails?.customerId ? { customer_id: customerDetails.customerId } : {}),
-    // default no-auth auto-charge is NOT used — the UI opens the payment page from short_url
-  });
+  await acknowledgePurchase({ productId: plan.id, purchaseToken, isSubscription: true }).catch(() => {});
 
   return {
-    razorpaySubId: subscription.id,
-    planId,
+    success: true,
+    planId: plan.id,
     planName: plan.name,
     priceInr: plan.priceInr,
-    currency: 'INR',
-    totalCount: subscription.total_count,
-    interval: subscription.interval,
-    shortUrl: subscription.short_url, // app opens this for the user to pay
-    periodEndIso: new Date(periodEnd).toISOString(),
+    billingCycle: plan.billingCycle,
+    perks: plan.perks ?? [],
+    subscriptionId: docId,
+    currentPeriodEnd: periodEnd.toISOString(),
   };
 }
 
 /**
- * Cancel the caller's active subscription: stop renewals at Razorpay and mark
- * the local row cancelled. The already-paid current period runs to its end —
- * benefits (Pro/Creator) stay until the period expires. Admins get a 409 —
- * their Creator access is permanent, there is nothing to cancel.
+ * Cancel the caller's active subscription.
+ *
+ * Play Billing has no server-side "cancel" call for a token; cancellation is
+ * user-initiated in the Play Store. So this marks the local row cancelled —
+ * the already-paid current period keeps benefits until expiry, and
+ * SUBSCRIPTION_CANCELED from RTDN will confirm the state change.
  */
 export async function cancelActiveSubscription(userId) {
   const sub = await currentActiveSubscriptionWithPlan(userId);
@@ -86,17 +126,8 @@ export async function cancelActiveSubscription(userId) {
   const row = rows[0];
   if (!row) return err(404, 'No active subscription to cancel');
 
-  if (row.razorpaySubId) {
-    try {
-      await razorpay().subscriptions.cancel(row.razorpaySubId, false);
-    } catch (e) {
-      // Already cancelled/expired at Razorpay is fine — just sync locally.
-      if (!/already|cancelled|expired|subscription/i.test(e?.message ?? '')) {
-        return err(502, 'Could not cancel the subscription at Razorpay — try again');
-      }
-    }
-  }
-
+  // Informational hint: the user must also cancel in the Play Store so
+  // auto-renewals stop. RTDN will surface the actual state.
   await update(COLS.userSubscriptions, row.id, {
     status: 'cancelled',
     cancelledAt: new Date(),
@@ -105,90 +136,43 @@ export async function cancelActiveSubscription(userId) {
 
   return {
     success: true,
-    subscriptionId: row.razorpaySubId,
+    subscriptionId: row.id,
     planId: row.planId,
     cancelledAt: new Date().toISOString(),
+    note: 'Also cancel in the Play Store (Subscriptions) to stop renewals',
   };
 }
 
-export async function activateSubscription(sub) {
-  const userId = sub.notes?.userId;
-  if (!userId) return; // seeded/historical subs without notes — nothing to wire
+/**
+ * RTDN lifecycle events — extend / expire / cancel a subscription from
+ * Google's push notification (SUBSCRIPTION_RENEWED / EXPIRED / CANCELED).
+ */
+export async function handleRTDNSubscription({ purchaseToken, eventType }) {
+  const docId = `sub_${purchaseToken}`;
+  const existing = await findByPk(COLS.userSubscriptions, docId);
+  if (!existing) return; // unknown token — ignore
 
-  const planId = planIdFromRazorpayPlan(sub.plan_id);
-  if (!planId) return; // plan removed from dashboard — nothing to wire
-
-  const periodStart = new Date(sub.current_start * 1000);
-  const periodEnd = new Date(sub.current_end * 1000);
-
-  await runTransaction(async (tx) => {
-    const plan = await planById(planId);
-    const docId = `sub_${sub.id}`;
-    const existing = await inTxGet(tx, COLS.userSubscriptions, docId);
-    // Pre-read the balance BEFORE any write — Firestore transactions cannot read
-    // after a write (writeLedger below only writes when given the balance).
-    const prevBalance = Number((await inTxGet(tx, COLS.userBalances, userId))?.balanceInr ?? 0);
-
-    if (existing) {
-      // Renewal — roll current_period_* forward on the same doc; status stays active.
-      inTxSet(tx, COLS.userSubscriptions, docId, {
-        currentPeriodStart: periodStart,
-        currentPeriodEnd: periodEnd,
-        status: 'active',
-        updatedAt: new Date(),
-      });
-      return;
-    }
-
-    inTxSet(tx, COLS.userSubscriptions, docId, {
-      userId,
-      planId,
-      razorpaySubId: sub.id,
+  if (eventType === 'SUBSCRIPTION_RENEWED' || eventType === 'SUBSCRIPTION_RESTARTED') {
+    const details = await verifySubscription({ purchaseToken }).catch(() => null);
+    await update(COLS.userSubscriptions, docId, {
       status: 'active',
-      currentPeriodStart: periodStart,
-      currentPeriodEnd: periodEnd,
-      cancelledAt: null,
-      createdAt: new Date(),
+      currentPeriodEnd: details
+        ? new Date(Number(details.expiryTimeMillis)).toISOString()
+        : new Date(Date.now() + MONTH_MS).toISOString(),
       updatedAt: new Date(),
     });
-
-    if (plan?.priceInr) {
-      await writeLedger(
-        tx,
-        {
-          userId,
-          type: 'subscription_payment',
-          direction: 'debit',
-          amountInr: plan.priceInr,
-          refId: docId,
-          note: `Subscription — ${plan.name} (₹${plan.priceInr}/month)`,
-          balanceInr: prevBalance,
-        },
-      );
-    }
-  });
-}
-
-export async function deactivateSubscription(sub) {
-  const rows = await queryAll({
-    collection: COLS.userSubscriptions,
-    filters: [{ field: 'razorpaySubId', value: sub.id }, { field: 'status', value: 'active' }],
-    orderBy: { field: 'createdAt', direction: 'desc' },
-    limit: 1,
-  });
-  const row = rows.rows[0];
-  if (!row) return;
-  await update(COLS.userSubscriptions, row.id, {
-    status: sub.status === 'cancelled' ? 'cancelled' : 'expired',
-    cancelledAt: new Date(),
-    updatedAt: new Date(),
-  });
-}
-
-function planIdFromRazorpayPlan(rzpPlanId) {
-  if (!rzpPlanId) return null;
-  for (const ours of ['pro', 'creator']) {
-    if (razorpayPlanIdFor(ours) === rzpPlanId) return ours;
+  } else if (eventType === 'SUBSCRIPTION_EXPIRED') {
+    await update(COLS.userSubscriptions, docId, {
+      status: 'expired',
+      updatedAt: new Date(),
+    });
+  } else if (eventType === 'SUBSCRIPTION_CANCELED') {
+    await update(COLS.userSubscriptions, docId, {
+      status: 'cancelled',
+      cancelledAt: new Date(),
+      updatedAt: new Date(),
+    });
   }
-  return null;
 }
+
+const MONTH_MS = 30 * 24 * 60 * 60 * 1000;
