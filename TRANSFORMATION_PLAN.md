@@ -22,8 +22,8 @@
 | Referral + oAuth anti-abuse | [`plans/referrals.md`](plans/referrals.md) | ✅ Built |
 | Withdrawal fee model | [`plans/withdrawals.md`](plans/withdrawals.md) | ✅ Built |
 | ~~Web checkout (Razorpay)~~ | ~~`plans/web-checkout.md`~~ | ❌ Removed (Play Billing only) |
-| Ads & ad-free | [`plans/ads-adfree.md`](plans/ads-adfree.md) | 🚧 Draft |
-| Moderation & engagement | [`plans/moderation.md`](plans/moderation.md) | 🚧 Draft |
+| Ads & ad-free | [`plans/ads-adfree.md`](plans/ads-adfree.md) | ✅ Built |
+| Moderation & engagement | [`plans/moderation.md`](plans/moderation.md) | ✅ Built |
 | Shared reference (data model, endpoints, env, risks) | [`plans/reference.md`](plans/reference.md) | 🚧 Draft |
 
 ## Build order

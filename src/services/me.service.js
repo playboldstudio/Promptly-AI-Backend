@@ -8,14 +8,15 @@ import {
   countDocuments,
 } from '../db/firestoreRepo.js';
 import { firebaseAuth } from '../db/firestore.js';
-import { currentActiveSubscriptionWithPlan } from './payments/subscription-utils.js';
+import { currentActiveSubscriptionWithPlan, hasAdFreeAccess } from './payments/subscription-utils.js';
 import { cancelActiveSubscription } from './payments/subscriptions.service.js';
 import { isAdminEmail } from '../config/env.js';
 
 export async function getProfile(userId) {
-  const [subscription, kyc] = await Promise.all([
+  const [subscription, kyc, adFree] = await Promise.all([
     currentActiveSubscriptionWithPlan(userId),
     findByPk(COLS.kycVerifications, userId),
+    hasAdFreeAccess(userId),
   ]);
 
   return {
@@ -23,6 +24,7 @@ export async function getProfile(userId) {
       ? { ...subscription }
       : null,
     kycStatus: kyc?.status ?? 'not_submitted',
+    adFree,
   };
 }
 

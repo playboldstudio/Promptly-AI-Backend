@@ -14,8 +14,8 @@ independently and can be built in isolation.
 | [referrals.md](referrals.md) | Referral program + oAuth-only signup + anti-abuse | ✅ Built | Phase 3 |
 | [withdrawals.md](withdrawals.md) | Withdrawal model (only platform fee deducted at payout — no gateway fee) | ✅ Built | Phase 4 |
 | ~~[web-checkout.md](web-checkout.md)~~ | ~~Razorpay web checkout (dual gateway)~~ | ❌ Removed | — |
-| [ads-adfree.md](ads-adfree.md) | Ads & one-time ad-free purchase | 🚧 Draft | Phase 5 |
-| [moderation.md](moderation.md) | Prompt engagement & report→appeal→admin moderation | 🚧 Draft | Phase 6 |
+| [ads-adfree.md](ads-adfree.md) | Ads & one-time ad-free purchase | ✅ Built | Phase 5 |
+| [moderation.md](moderation.md) | Prompt engagement & report→appeal→admin moderation | ✅ Built | Phase 6 |
 | [reference.md](reference.md) | Shared reference — data model, API endpoints, env vars, roadmap, risks | 🚧 Draft | Cross-cutting |
 
 ## Build order

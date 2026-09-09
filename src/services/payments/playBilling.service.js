@@ -211,8 +211,13 @@ export async function grantAdFree({ userId, purchaseToken }) {
       const fresh = await inTxGet(tx, COLS.users, userId);
       if (fresh?.adFree) throw Object.assign(new Error('already-granted'), { alreadyGranted: true });
 
-      // Mark user as ad-free.
-      inTxSet(tx, COLS.users, userId, { adFree: true, updatedAt: new Date() });
+      // Mark user as ad-free with audit fields.
+      inTxSet(tx, COLS.users, userId, {
+        adFree: true,
+        adFreePurchasedAt: new Date(),
+        adFreeSku: 'ad_free',
+        updatedAt: new Date(),
+      });
 
       // Record the purchase (deterministic id = userId_ad_free).
       inTxSet(tx, COLS.promptPurchases, `${userId}_${AD_FREE_DOC_ID}`, {

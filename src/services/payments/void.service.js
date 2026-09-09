@@ -258,7 +258,12 @@ async function voidAdFree({ userId, purchaseToken, reason }) {
     if (!perkActive && !fresh?.voidedAt) {
       const user = await inTxGet(tx, COLS.users, userId);
       if (user?.adFree) {
-        inTxSet(tx, COLS.users, userId, { adFree: false, updatedAt: new Date() });
+        inTxSet(tx, COLS.users, userId, {
+          adFree: false,
+          adFreePurchasedAt: null,
+          adFreeSku: null,
+          updatedAt: new Date(),
+        });
       }
     }
   });

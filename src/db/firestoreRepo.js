@@ -30,6 +30,8 @@ const COLLECTIONS = Object.freeze({
   referralCodes: 'referral_codes',
   referrals: 'referrals',
   deviceFingerprints: 'device_fingerprints',
+  promptReports: 'prompt_reports',
+  promptLikes: 'prompt_likes',
 });
 
 export const COLS = COLLECTIONS;
@@ -68,6 +70,11 @@ export function toWritePayload(obj) {
 
 export function increment(n = 1) {
   return FieldValue.increment(n);
+}
+
+/** Append an element to a Firestore array field (dedupes on `FieldValue` merge). */
+export function arrayUnion(...values) {
+  return FieldValue.arrayUnion(...values);
 }
 
 /**

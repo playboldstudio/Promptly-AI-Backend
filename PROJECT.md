@@ -95,6 +95,7 @@ src/
       subscription-utils.js  # active-subscription + fee helpers
     referrals/
       referral.service.js   # ★ Referral program: generate/validate/apply (bonus credits) + stats/list
+    moderation.service.js   # ★ Report → soft-delete → appeal → admin queue + like/share (plans/moderation.md)
   scripts/
     expireBonus.js           # npm run wallet:expire — daily bonus vintage expiry sweep
     reconcile.js             # npm run reconcile — monthly Play Billing commission reconciliation
@@ -148,12 +149,16 @@ Bearer token, **✅+admin** = required token + admin email.
 | POST | `/prompts/image` | ✅ | Upload a prompt cover (raw `image/*` body, ≤3 MB). **Moderated** (Vision) — adult/racy rejected with 422; admins exempt (bulk import is separate). Returns `{ imageUrl }`. |
 | POST | `/prompts/:id/save` | ✅ | Save a prompt (idempotent) |
 | POST | `/prompts/:id/unsave` | ✅ | Remove a save (idempotent) |
+| POST | `/prompts/:id/report` | ✅ | Report a prompt `{ reason, description? }`. Rate-limited (5/user/hour); auto-soft-deletes at threshold |
+| POST | `/prompts/:id/appeal` | ✅ | Creator appeal within the 7-day window. `{ reason }` |
+| POST | `/prompts/:id/like` | ✅ | Toggle like (idempotent). `{ liked, likeCount }` |
+| POST | `/prompts/:id/share` | ✅ | Increment `shareCount`. `{ shared, shareCount }` |
 | DELETE | `/prompts/:id` | ✅ | Owner deletes their prompt |
 
 ### Me (profile & creator account)
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/me/profile` | ✅ | User profile + current subscription + KYC/payout state |
+| GET | `/me/profile` | ✅ | User profile + current subscription + KYC/payout state + `adFree` entitlement (one-time purchase OR sub perk) |
 | PATCH | `/me/profile` | ✅ | Update profile fields |
 | GET | `/me/prompts` | ✅ | Prompts the user has published |
 | GET | `/me/saved` | ✅ | Saved prompts (join table, newest first) |
@@ -199,6 +204,14 @@ Bearer token, **✅+admin** = required token + admin email.
 | POST | `/admin/prompts/bulk-upload/validate` | ✅+admin | Dry run — validates CSV + image availability, creates nothing |
 | POST | `/admin/prompts/bulk-upload` | ✅+admin | Full import — validates, uploads images to Storage, batch-creates prompt docs. Accepts multipart (`csv` + `images[]`) **or** a single `bundle` ZIP containing `prompts.csv` + images. Returns a report with per-row errors. |
 
+### Admin moderation
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/admin/prompts/reports` | ✅+admin | **Moderation queue** — prompts in `reported`/`appealed` states joined with pending `prompt_reports`. `?status=` |
+| POST | `/admin/prompts/:id/approve` | ✅+admin | Approve a creator appeal → restore to `published`, reset report counters |
+| POST | `/admin/prompts/:id/reject` | ✅+admin | Reject an appeal → hard-delete the prompt |
+| POST | `/admin/prompts/:id/dismiss-report` | ✅+admin | Dismiss reports → restore to `published`, clear counters |
+
 ### Webhooks
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -215,15 +228,17 @@ source of truth in `src/db/firestoreRepo.js` (`COLS`).
 
 | Collection | Purpose / shape |
 |---|---|
-| `users` | id = Firebase UID. `email, fullName, avatarUrl, role, upiId, adFree, ...`, soft-delete via `deleted` |
+| `users` | id = Firebase UID. `email, fullName, avatarUrl, role, upiId, adFree, adFreePurchasedAt, adFreeSku, ...`, soft-delete via `deleted` |
 | `subscription_plans` | `free` / `pro` / `pro_annual` / `creator` / `creator_annual` plans (seeded). Gates daily post limit & `canPostPaid`; carries `platformFeePercent` (withdrawal fee: Pro 15%, Creator 5%) and `perks` array (e.g. `ad_free`) |
 | `user_subscriptions` | A user's Play Billing subscription (one active). `gatewaySubscriptionId` = purchase token. Status: `active/cancelled/expired` |
-| `prompts` | Marketplace prompts: `authorId, title, description, promptText, imageUrl, images[], category, tags, isPaid, priceInr, status, viewCount, saveCount, createdAt` |
+| `prompts` | Marketplace prompts: `authorId, title, description, promptText, imageUrl, images[], category, tags, isPaid, priceInr, status, viewCount, saveCount, likeCount, shareCount, reportCount, createdAt`. Moderation: `status` ∈ `published|reported|appealed|deleted`, `reportedAt, reportedBy[], appealStatus, appealReason, appealDeadline, appealedAt` |
 | `prompt_purchases` | One unlock per buyer per prompt. Deterministic id `(buyerId, promptId)`. Freezes `priceInr` (gross) + `buyerPaysInr` (+5% tx fee) + `gatewayFeeInr` (commission, tracked only) |
 | `transactions` | Ledger rows (every credit/debit, `balanceType` = which bucket) — drives `/me/transactions` and the wallet audit trail |
 | `user_wallets` | ★ Multi-balance wallet, id = user id. `earnings` (withdrawable) / `deposits` (own money) / `bonus` (spend-capped + expiring), plus `bonusVintages` map for per-credit FEFO expiry |
 | `payouts` | Withdrawal requests. Status: `pending / processing / paid / failed` |
 | `saved_prompts` | Join table. Id `(userId, promptId)` |
+| `prompt_reports` | ★ Moderation join table. Id `(userId, promptId)`. `userId, promptId, reason (spam/inappropriate/copyright/misleading/other), description, status (pending/resolved/dismissed), createdAt` |
+| `prompt_likes` | ★ Like join table. Id `(userId, promptId)`. `userId, promptId, likedAt` |
 | `user_balances` | **Legacy** running INR balance per user — superseded by `user_wallets` (migrated via `npm run db:migrate-wallets`) |
 | `referral_codes` | Referral codes. Id = code. `code, userId, isActive` |
 | `referrals` | Completed referrals. Deterministic id `(referrerId, refereeId)`. `referrerId, refereeId, code, status, bonusCredited, ipAddress` |
@@ -245,7 +260,8 @@ manually with `gcloud firestore indexes composite create --database=<db> ...` pe
 `npx firebase deploy --only firestore` for everything. Hot indexes: `prompts(status,createdAt)`,
 `prompts(authorId,createdAt)`, `transactions(userId,createdAt)`, `prompt_purchases(authorId,status)`,
 `prompt_purchases(buyerId,status)`, `saved_prompts(userId,savedAt)`, `payouts(userId,status)`,
-`user_subscriptions(userId,status)`.
+`user_subscriptions(userId,status)`, plus moderation — `prompts(status,updatedAt)`,
+`prompt_reports(promptId,status,createdAt)`.
 
 ---
 
@@ -339,6 +355,8 @@ Paid prompts   Buyer ──(₹ = price + 5% tx fee)───────► Pla
 | `REFERRAL_WELCOME_BONUS_INR` | Referee welcome bonus (default 25) |
 | `REFERRAL_MAX_PER_USER` | Max referrals per referrer (default 100) |
 | `REFERRAL_MAX_PER_IP_PER_DAY` | Max referrals from one IP per day (default 5) |
+| `MODERATION_REPORT_THRESHOLD` | Reports before a prompt soft-deletes itself (default 5) |
+| `MODERATION_APPEAL_WINDOW_DAYS` | Creator appeal window after soft-delete (default 7) |
 
 **Security hygiene:** never commit `.env` or service-account key files (gitignored). On Cloud Run,
 secret values are pulled from Secret Manager at deploy time.
@@ -397,9 +415,9 @@ npm run db:seed             # once — starter plans + demo prompts
 npm run db:migrate-wallets  # once — migrate legacy user_balances → user_wallets
 npm run wallet:expire       # daily — bonus vintage expiry sweep (or via Cloud Scheduler)
 npm run dev                 # http://localhost:8080, hot reload
-npm test                    # node:test unit tests (25 tests, no framework dep)
+npm test                    # node:test unit tests (29 tests, no framework dep)
 ```
 
 The Firebase emulator is supported via `FIRESTORE_EMULATOR_HOST`. Tests only exercise pure /
-util modules (CSV, paging, prompt-import, metrics, rate-limit, signatures) — none touch live
-Firestore.
+util modules (CSV, paging, prompt-import, metrics, rate-limit, signatures, withdrawal-fees,
+moderation-config) — none touch live Firestore.

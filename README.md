@@ -118,7 +118,15 @@ RTDN topic pointing at `https://<cloud-run-url>/webhooks/google/rtdn`.
 | POST | `/prompts` | ✅ | **Creator publish.** Body `{ title, description, promptText, imageUrl?, category, tags?, isPaid, priceInr? }`. `authorId` = caller. Gated on the plan's daily post limit (Free = 3/day; Pro/Creator unlimited) and paid prompts require the **Creator** plan (`canPostPaid`). |
 | POST | `/prompts/:id/save` | ✅ | Save a prompt (idempotent). Returns `{ saved, saveCount }`. |
 | POST | `/prompts/:id/unsave` | ✅ | Remove a save (idempotent). Returns `{ saved, saveCount }`. |
-| GET | `/me/profile` | ✅ | Signed-in user profile + current subscription + KYC state |
+| POST | `/prompts/:id/report` | ✅ | **Report** a prompt. Body `{ reason, description? }`. Rate-limited (5/user/hour). Auto-soft-deletes at `reportCount ≥ threshold`. |
+| POST | `/prompts/:id/appeal` | ✅ | Creator **appeal** within the 7-day window. Body `{ reason }`. |
+| POST | `/prompts/:id/like` | ✅ | **Toggle like** (idempotent). Returns `{ liked, likeCount }`. |
+| POST | `/prompts/:id/share` | ✅ | Increment `shareCount`. Returns `{ shared, shareCount }`. |
+| GET | `/admin/prompts/reports` | ✅ + admin | **Admin moderation queue** (`reported`/`appealed` prompts + pending reports). `?status=`. |
+| POST | `/admin/prompts/:id/approve` | ✅ + admin | **Admin.** Approve a creator appeal → prompt restored to published, report counters reset. |
+| POST | `/admin/prompts/:id/reject` | ✅ + admin | **Admin.** Reject an appeal → prompt hard-deleted. |
+| POST | `/admin/prompts/:id/dismiss-report` | ✅ + admin | **Admin.** Dismiss reports → prompt restored to published, counters cleared. |
+| GET | `/me/profile` | ✅ | Signed-in user profile + current subscription + KYC state + `adFree` entitlement |
 | GET | `/me/prompts` | ✅ | Prompts the user has published |
 | GET | `/me/saved` | ✅ | Saved prompts (join table) |
 | GET | `/me/transactions` | ✅ | **My Account** ledger (from `transactions`) |
@@ -229,7 +237,8 @@ Firestore collections (schema-less; see `src/db/firestoreRepo.js` for the
 collection names): `users`, `subscription_plans`, `user_subscriptions`, `prompts`,
 `prompt_purchases`, `transactions`, `payouts`, `saved_prompts`,
 `user_balances` (legacy), **`user_wallets`** (multi-balance wallet),
-`referral_codes` / `referrals` / `device_fingerprints` (referral program), plus
+`referral_codes` / `referrals` / `device_fingerprints` (referral program),
+`prompt_reports` / `prompt_likes` (moderation join tables), plus
 `webhook_events` for idempotent Play Billing RTDN replay.
 
 Key invariants enforced by the service layer:
@@ -277,6 +286,7 @@ src/
     ledger.js            # legacy running balance (user_balances) + writeLedger() helpers
     wallet.service.js    # multi-balance wallet: get/credit/debit, FEFO bonus, deposit top-up split, expiry
     referrals/           # referral program: generate/validate/apply (bonus credits) + stats/list
+    moderation.service.js # report → soft-delete → appeal → admin queue (like/share too)
     prompt-metrics.js    # derived isTrending / isNew from counts + age
     earnings.service.js  # creator earnings aggregation (wallet-backed)
     rtdn.service.js      # Play Billing RTDN → idempotent log (dedupe doc id) → dispatch

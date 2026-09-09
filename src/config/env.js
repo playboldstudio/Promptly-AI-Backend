@@ -40,6 +40,10 @@ const envSchema = z.object({
   REFERRAL_WELCOME_BONUS_INR: z.coerce.number().int().positive().default(25), // referee
   REFERRAL_MAX_PER_USER: z.coerce.number().int().positive().default(100),
   REFERRAL_MAX_PER_IP_PER_DAY: z.coerce.number().int().positive().default(5),
+
+  // Moderation (plans/moderation.md)
+  MODERATION_REPORT_THRESHOLD: z.coerce.number().int().positive().default(5),
+  MODERATION_APPEAL_WINDOW_DAYS: z.coerce.number().int().positive().default(7),
 });
 
 const parsed = envSchema.safeParse(process.env);
