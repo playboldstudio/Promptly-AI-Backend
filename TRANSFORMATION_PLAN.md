@@ -17,8 +17,8 @@
 |---|---|---|
 | **Master index** | [`plans/README.md`](plans/README.md) | ✅ |
 | Monetization (tiers, SKUs, deposit+bonus, 5% buyer fee) | [`plans/pricing.md`](plans/pricing.md) | ✅ |
-| Play Billing + RTDN + refunds | [`plans/play-billing.md`](plans/play-billing.md) | 🚧 Draft |
-| Multi-balance wallet + FEFO bonus | [`plans/wallet.md`](plans/wallet.md) | 🚧 Draft |
+| Play Billing + RTDN + refunds | [`plans/play-billing.md`](plans/play-billing.md) | ✅ Built (backend complete; end-to-end test pending app track) |
+| Multi-balance wallet + FEFO bonus | [`plans/wallet.md`](plans/wallet.md) | ✅ Built |
 | Referral + oAuth anti-abuse | [`plans/referrals.md`](plans/referrals.md) | 🚧 Draft |
 | Withdrawal fee model | [`plans/withdrawals.md`](plans/withdrawals.md) | 🚧 Draft |
 | ~~Web checkout (Razorpay)~~ | ~~`plans/web-checkout.md`~~ | ❌ Removed (Play Billing only) |

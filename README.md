@@ -56,6 +56,7 @@ npm run dev                # http://localhost:8080
 | `npm run db:seed` | Seed starter data into Firestore (idempotent) |
 | `npm run db:migrate-wallets` | One-time: migrate legacy `user_balances` → `user_wallets` (idempotent) |
 | `npm run wallet:expire` | Daily: bonus vintage expiry sweep (or via Cloud Scheduler) |
+| `npm run reconcile` | Monthly: Play Billing commission reconciliation (snapshot vs re-computed fee drift check) |
 | `npm run db:reset` | **Destructive** — clear all Firestore collections, then seed (dev only; refuses in production) |
 
 > Firestore is schemaless — collections are created on first write. Composite
@@ -124,6 +125,7 @@ RTDN topic pointing at `https://<cloud-run-url>/webhooks/google/rtdn`.
 | GET | `/me/earnings` | ✅ | Creator earnings summary (lifetime, withdrawn, pending, balance) |
 | GET | `/me/earnings/prompts` | ✅ | Per-prompt earnings breakdown |
 | POST | `/payments/playbilling/verify` | ✅ | Verify a Play Billing purchase token + grant. Body `{ productId, purchaseToken, isSubscription? }`. `prompt_<id>` → paid prompt unlock (buyer pays price + 5% transaction fee; creator credited **gross** to wallet `earnings`). `pro`/`pro_annual`/`creator`/`creator_annual` → activate subscription (+ ad-free perk). `ad_free` → one-time ad-free. `deposit_s/m/l/xl` → deposit top-up (net after gateway fee → `deposits`, fee recycled as `bonus`). |
+| POST | `/payments/playbilling/void` | ✅ | Refund/void a purchase. Body `{ productId, purchaseToken, isSubscription?, reason? }`. Reverses grant: prompt → creator earnings debit; deposit → net refund from deposits; ad-free → revoke (unless sub-perk); subscription → mark voided. |
 | GET | `/payments/wallet` | ✅ | Wallet breakdown: `balances` (earnings / deposits / bonus with amounts + spend rules), `totalBalanceInr`, `bonusVintages` |
 | POST | `/payments/payouts` | ✅ | Request a withdrawal (**manual settle**, min ₹60). Body `{ amountInr }`. Requires saved bank details; deducts only the withdrawal fee (15% Pro / 5% Creator), reserves the balance as `pending`. |
 | GET | `/payments/admin/payouts` | ✅ + admin | **Admin.** List payout requests with UPI details. `?status=pending`. Requires `ADMIN_EMAILS` (403 otherwise). |
@@ -278,9 +280,10 @@ src/
 ## Roadmap / not yet built
 
 - **Admin role gating** — `/payments/admin/*` is gated by `ADMIN_EMAILS` (403 for others).
-- Refund/void flow (`prompt_purchases.status = 'voided'` → reverse ledger) — planned
-  (see `plans/play-billing.md` §7 via RTDN/post-backend). Wallet refund paths exist:
-  `refundDeposit` debits `deposits` and removes the recycled bonus vintage.
+- Refund/void flow (`prompt_purchases.status = 'voided'` → reverse ledger) — built
+  (`src/services/payments/void.service.js` + `POST /payments/playbilling/void`).
+  Wallet refund paths exist: `refundDeposit` debits `deposits` and removes the
+  recycled bonus vintage.
 - Automated payouts — only if/when you register a **business** account; the manual-settle
   flow is the solo-individual path
 - Per-user bonus-expiry reminder push (`getBonusExpiringSoon` exists; the notification

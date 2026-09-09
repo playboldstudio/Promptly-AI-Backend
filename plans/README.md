@@ -9,8 +9,8 @@ independently and can be built in isolation.
 | File | Feature | Status | Build order |
 |------|---------|--------|-------------|
 | [pricing.md](pricing.md) | Monetization — Pro/Creator tiers, one-time purchases, deposit + bonus rewards | ✅ Ready | Phase 0 (decide before anything else) |
-| [play-billing.md](play-billing.md) | Play Billing integration (purchases, subscriptions, RTDN, refunds) | 🚧 Draft | Phase 1 |
-| [wallet.md](wallet.md) | Multi-balance wallet (earnings / deposits / bonus) + FEFO bonus expiry | 🚧 Draft | Phase 2 |
+| [play-billing.md](play-billing.md) | Play Billing integration (purchases, subscriptions, RTDN, refunds) | ✅ Built | Phase 1 |
+| [wallet.md](wallet.md) | Multi-balance wallet (earnings / deposits / bonus) + FEFO bonus expiry | ✅ Built | Phase 2 |
 | [referrals.md](referrals.md) | Referral program + oAuth-only signup + anti-abuse | 🚧 Draft | Phase 3 |
 | [withdrawals.md](withdrawals.md) | Withdrawal model (only platform fee deducted at payout — no gateway fee) | 🚧 Draft | Phase 4 |
 | ~~[web-checkout.md](web-checkout.md)~~ | ~~Razorpay web checkout (dual gateway)~~ | ❌ Removed | — |

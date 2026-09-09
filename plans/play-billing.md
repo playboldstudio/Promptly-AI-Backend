@@ -265,10 +265,10 @@ unlock.
 [x] POST /payments/playbilling/verify (one-time: prompt / deposit / ad-free)
 [x] Subscription purchase handler (+ entitlements, monthly + annual)
 [x] POST /webhooks/google/rtdn + event map
-[ ] Refund/void handler (★)
+[x] Refund/void handler (★)  — src/services/payments/void.service.js + POST /payments/playbilling/void
 [x] Purchase-token storage on grants
-[ ] Test with Play Console internal track
-[ ] Monthly reconciliation script
+[ ] Test with Play Console internal track   ← APP-SIDE (Android build + tester list) — see APP_INTEGRATION.md §4
+[x] Monthly reconciliation script  — npm run reconcile
 ```
 
 ## 11. Open questions

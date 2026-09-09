@@ -11,6 +11,7 @@ import {
   markPayoutFailed,
 } from '../services/payments/payouts.service.js';
 import { grantPromptUnlock, grantAdFree, handleDepositTopUp } from '../services/payments/playBilling.service.js';
+import { voidOneTimePurchase, voidSubscriptionPurchase } from '../services/payments/void.service.js';
 import { activateSubscriptionFromToken, cancelActiveSubscription } from '../services/payments/subscriptions.service.js';
 import { isDepositProduct, isAdFreeProduct } from '../services/payments/products.js';
 import { PRODUCT_TO_PLAN } from '../services/payments/plans.js';
@@ -43,6 +44,13 @@ const playBillingVerifySchema = z.object({
   productId: z.string().min(1),
   purchaseToken: z.string().min(1),
   isSubscription: z.union([z.boolean(), z.literal('true'), z.literal('false')]).optional().default(false),
+});
+
+const playBillingVoidSchema = z.object({
+  productId: z.string().min(1),
+  purchaseToken: z.string().min(1),
+  isSubscription: z.union([z.boolean(), z.literal('true'), z.literal('false')]).optional().default(false),
+  reason: z.string().optional(),
 });
 
 /**
@@ -92,6 +100,34 @@ router.post('/playbilling/verify', moneyLimiter, async (req, res, next) => {
     }
 
     return next(httpError(400, 'Unknown product'));
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * POST /payments/playbilling/void — void/refund a Play Billing grant.
+ * Body: { productId, purchaseToken, isSubscription?, reason? }.
+ * Reverses the matching grant: prompt unlock revokes + debits creator
+ * earnings (capped), deposit top-up refunds net + removes bonus vintage,
+ * ad-free revokes (unless a subscription perk), subscription is marked void.
+ * (plans/play-billing.md §7)
+ */
+router.post('/playbilling/void', moneyLimiter, async (req, res, next) => {
+  try {
+    const parsed = playBillingVoidSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return next(httpError(400, 'Missing void details'));
+    const { productId, purchaseToken, isSubscription, reason } = parsed.data;
+
+    if (isSubscription === true || isSubscription === 'true') {
+      const result = await voidSubscriptionPurchase({ purchaseToken, reason });
+      if (result.error) return next(httpError(result.error.status, result.error.message));
+      return res.json(result);
+    }
+
+    const result = await voidOneTimePurchase({ userId: req.userId, productId, purchaseToken, reason });
+    if (result.error) return next(httpError(result.error.status, result.error.message));
+    return res.json(result);
   } catch (err) {
     return next(err);
   }

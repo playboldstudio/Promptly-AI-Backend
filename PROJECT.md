@@ -87,12 +87,14 @@ src/
     payments/
       balance-types.js       # ★ BALANCE_TYPES: earnings / deposits / bonus + spend rules & priority
       playBilling.service.js # verify+grant: prompt unlock (gross credit to wallet), ad-free, deposit top-up (net→deposits, fee→bonus)
+      void.service.js        # ★ Refund/void handler: prompt (earnings debit), deposit (net refund), ad-free (revoke), subscription (mark voided)
       subscriptions.service.js # Play Billing token activation + cancel + RTDN lifecycle
       payouts.service.js     # Manual-settle withdrawals (wallet earnings as source of truth)
       plans.js               # BUILTIN_PLANS fallback + plan lookups
       subscription-utils.js  # active-subscription + fee helpers
   scripts/
     expireBonus.js           # npm run wallet:expire — daily bonus vintage expiry sweep
+    reconcile.js             # npm run reconcile — monthly Play Billing commission reconciliation
   utils/
     http-error.js            # httpError(status, message)
     paging.js                # parsePaging — limit (≤100, default 50) + offset clamps
@@ -168,6 +170,7 @@ Bearer token, **✅+admin** = required token + admin email.
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | POST | `/payments/playbilling/verify` | ✅ | Body `{ productId, purchaseToken, isSubscription? }` → verify Play Billing token + grant. `prompt_<id>` unlocks a prompt (buyer pays price + 5% transaction fee, creator credited **gross** to wallet `earnings`). `pro` / `pro_annual` / `creator` / `creator_annual` activate subscriptions (+ ad-free perk). `ad_free` grants one-time ad-free. `deposit_s/m/l/xl` credit a deposit top-up (**net** after gateway fee → `deposits`, fee recycled as `bonus`). |
+| POST | `/payments/playbilling/void` | ✅ | Body `{ productId, purchaseToken, isSubscription?, reason? }` → refund/void a purchase. Prompt → creator earnings debit (capped); deposit → net refund from deposits; ad-free → revoke unless sub-perk; subscription → mark voided. |
 | GET | `/payments/wallet` | ✅ | Wallet breakdown: `balances` (earnings / deposits / bonus with amounts + spend rules), `totalBalanceInr`, `bonusVintages` (per-credit remaining + expiry) |
 | DELETE | `/payments/subscriptions` | ✅ | Cancel active subscription (user also cancels in Play Store) |
 | GET | `/payments/payouts/eligibility` | ✅ | Withdrawable balance, min withdrawal, eligible + blockers |

@@ -13,6 +13,7 @@
     "db:seed": "node src/db/seed.js",
     "db:migrate-wallets": "node src/db/migrate-wallets.js",
     "wallet:expire": "node src/scripts/expireBonus.js",
+    "reconcile": "node src/scripts/reconcile.js",
     "test": "node --test"
   },
   "dependencies": {

@@ -364,14 +364,14 @@ export async function creditDepositTopUp(args) {
 }
 
 /**
- * Refund a deposit top-up: debit the NET from `deposits` and remove the recycled
- * bonus vintage (it never "belonged" to the user). If the user already spent the
- * bonus, the deposit debit can make `deposits` negative — an owed balance that
- * callers gate by blocking further deposit-spend until recovered.
+ * Refund a deposit top-up INSIDE an already-open transaction: debit the NET
+ * from `deposits` and remove the recycled bonus vintage (it never "belonged"
+ * to the user). Exported so the void handler can mark the purchase voided and
+ * refund atomically in one transaction (mirrors `creditDepositTopUpTx`).
  */
-export async function refundDeposit({ userId, netDeposit, vintageId, refId, note }) {
-  return runTransaction(async (tx) => {
-    const wallet = (await inTxGet(tx, COLS.userWallets, userId)) ?? zeroBalances();
+export function refundDepositTx(tx, { userId, netDeposit, vintageId, refId, note }) {
+  return inTxGet(tx, COLS.userWallets, userId).then((walletDoc) => {
+    const wallet = walletDoc ?? zeroBalances();
     const oldDeposits = bucketAmount(wallet, 'deposits');
     const newDeposits = toMoney(oldDeposits - netDeposit);
 
@@ -421,6 +421,14 @@ export async function refundDeposit({ userId, netDeposit, vintageId, refId, note
       depositsNegative: newDeposits < 0,
     };
   });
+}
+
+/**
+ * Refund a deposit top-up in its own transaction. Wrapper around
+ * `refundDepositTx` for callers without an open transaction.
+ */
+export async function refundDeposit(args) {
+  return runTransaction((tx) => refundDepositTx(tx, args));
 }
 
 /* ── Bonus expiry sweep ────────────────────────────────────────────────── */
