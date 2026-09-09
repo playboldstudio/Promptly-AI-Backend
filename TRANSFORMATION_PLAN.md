@@ -24,7 +24,7 @@
 | ~~Web checkout (Razorpay)~~ | ~~`plans/web-checkout.md`~~ | ❌ Removed (Play Billing only) |
 | Ads & ad-free | [`plans/ads-adfree.md`](plans/ads-adfree.md) | ✅ Built |
 | Moderation & engagement | [`plans/moderation.md`](plans/moderation.md) | ✅ Built |
-| Shared reference (data model, endpoints, env, risks) | [`plans/reference.md`](plans/reference.md) | 🚧 Draft |
+| Shared reference (data model, endpoints, env, risks) | [`plans/reference.md`](plans/reference.md) | ✅ Built |
 
 ## Build order
 

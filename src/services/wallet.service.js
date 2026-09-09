@@ -508,3 +508,49 @@ export async function getBonusExpiringSoon(userId, { withinDays = 7 } = {}) {
     .map(([id, v]) => ({ id, amount: toMoney(v.remaining ?? 0), expiresAt: v.expiresAt }));
   return { expiring: upcoming };
 }
+
+/* ── Admin manual adjustment ───────────────────────────────────────────────── */
+
+/**
+ * Admin-only manual wallet adjustment (support / refund-dispute tooling —
+ * plans/moderation.md §7). `deltaInr` is signed: positive credits, negative
+ * debits. Reuses `creditBalance` / `debitBalances` so the ledger row, FEFO
+ * bonus vintages and balance snapshots stay consistent with every other write.
+ */
+export async function adjustWallet({ userId, balanceType, deltaInr, note }) {
+  const bt = getBalanceType(balanceType);
+  if (!bt) {
+    return { error: { status: 400, message: `Unknown balance type — must be earnings, deposits or bonus` } };
+  }
+  if (!Number.isFinite(Number(deltaInr)) || Number(deltaInr) === 0) {
+    return { error: { status: 400, message: 'deltaInr must be a non-zero number' } };
+  }
+  const user = await findByPk(COLS.users, userId);
+  if (!user) return { error: { status: 404, message: 'User not found' } };
+
+  const amount = Math.abs(Math.round(Number(deltaInr) * 100) / 100);
+  const op = Number(deltaInr) > 0 ? 'credit' : 'debit';
+  const token = `${op}:${balanceType}:${amount}:${Date.now()}`;
+
+  if (op === 'credit') {
+    await creditBalance(userId, balanceType, amount, {
+      type: 'admin_adjustment',
+      refId: token,
+      note: note ?? `Admin adjustment +${amount} ${balanceType}`,
+    });
+  } else {
+    try {
+      await debitBalances(userId, [
+        { balanceType, amountInr: amount, meta: { type: 'admin_adjustment', refId: token, note: note ?? `Admin adjustment -${amount} ${balanceType}` } },
+      ]);
+    } catch (e) {
+      if (e.insufficient) {
+        return { error: { status: 409, message: `Insufficient ${balanceType} balance for this adjustment` } };
+      }
+      throw e;
+    }
+  }
+
+  const wallet = await getWallet(userId);
+  return { success: true, action: op, balanceType, amountInr: amount, wallet: wallet.balances };
+}

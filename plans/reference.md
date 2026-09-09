@@ -1,20 +1,27 @@
 # Shared Reference — Data Model, API, Env, Roadmap, Risks
 
 > Cross-cutting definitions shared by all feature files. Update here, not per-file.
+> **Status: ✅ Built** — reconciled with the shipped backend (Phases 1–6). Drift
+> from the original drafts is marked inline.
 
 ## 1. New Firestore collections
 
 ```javascript
-// COLS additions in firestoreRepo.js
-userWallets:        'user_wallets',        // multi-balance wallet
-referralCodes:      'referral_codes',      // referral codes
-referrals:          'referrals',           // referral records
-deviceFingerprints: 'device_fingerprints', // anti-abuse Play Account ID
-adFreePurchases:    'ad_free_purchases',   // one-time ad-free audit
-promptLikes:        'prompt_likes',        // like join table
-promptReports:      'prompt_reports',      // report join table
-promptShares:       'prompt_shares',       // (optional analytics log — else just a counter)
+// COLS additions in firestoreRepo.js — the collections that actually shipped:
+userWallets:        'user_wallets',        // multi-balance wallet (Phase 2)
+referralCodes:      'referral_codes',      // referral codes (Phase 3)
+referrals:          'referrals',           // referral records (Phase 3)
+deviceFingerprints: 'device_fingerprints', // anti-abuse Play Account ID (Phase 3)
+promptLikes:        'prompt_likes',        // like join table (Phase 6)
+promptReports:      'prompt_reports',      // report join table (Phase 6)
 ```
+
+> **Never created (reconciled):**
+> - `adFreePurchases: 'ad_free_purchases'` — the ad-free grant is recorded in the
+>   existing `prompt_purchases` collection with the deterministic id
+>   `${userId}_ad_free` (Phase 5). No separate audit collection was needed.
+> - `promptShares: 'prompt_shares'` — shares are just `shareCount++` on the prompt
+>   doc; no join table (plans/moderation.md §2).
 
 > `promo_codes`, `promo_redemptions`, `reward_rules`, `reward_events` — **do not
 > pre-create**. The unified `bonus` balance already future-proofs them; add
@@ -41,18 +48,15 @@ promptShares:       'prompt_shares',       // (optional analytics log — else j
 { id: 'playAccountId_userId', userId, playAccountId,
   ipAddress?, createdAt, lastSeenAt }
 
-// ad_free_purchases
-{ id: userId, userId, productId: 'ad_free', purchaseToken,
-  purchaseTime, amountInr, status: 'verified', createdAt, updatedAt }
-
+// ad_free  → recorded in prompt_purchases (id: 'userId_ad_free'), NOT a
+//   separate ad_free_purchases collection (reconciled — see §1)
+//   { buyerId, promptId: 'ad_free', authorId: null, priceInr: 149,
+//     gatewayOrderToken, gatewayFeeInr, status: 'completed', createdAt }
 // prompt_likes  (id: 'userId_promptId')
-{ userId, promptId, likedAt }
-
+// { userId, promptId, likedAt }
 // prompt_reports  (id: 'userId_promptId')
-{ userId, promptId, reason, description, status: 'pending'|'resolved'|'dismissed', createdAt }
-
-// prompt_shares  (analytics; or just shareCount on the prompt)
-{ promptId, userId?, sharedAt }
+// { userId, promptId, reason, description, status: 'pending'|'resolved'|'dismissed', createdAt }
+// prompt_shares  → no collection (reconciled) — just shareCount on the prompt doc
 ```
 
 ## 2. Updated schemas
@@ -138,29 +142,35 @@ promptShares:       'prompt_shares',       // (optional analytics log — else j
 
 ```json
 [
-  { "collectionGroup": "user_wallets",   "fields": [{ "fieldPath": "earnings", "order": "DESCENDING" }] },
   { "collectionGroup": "referral_codes", "fields": [{ "fieldPath": "userId", "order": "ASCENDING" },
                                                      { "fieldPath": "isActive", "order": "ASCENDING" }] },
+  { "collectionGroup": "referrals",      "fields": [{ "fieldPath": "ipAddress", "order": "ASCENDING" },
+                                                     { "fieldPath": "createdAt", "order": "DESCENDING" }] },
   { "collectionGroup": "referrals",      "fields": [{ "fieldPath": "referrerId", "order": "ASCENDING" },
-                                                     { "fieldPath": "status", "order": "ASCENDING" }] },
-  { "collectionGroup": "referrals",      "fields": [{ "fieldPath": "refereeId", "order": "ASCENDING" }] },
-  { "collectionGroup": "transactions",   "fields": [{ "fieldPath": "userId", "order": "ASCENDING" },
-                                                     { "fieldPath": "balanceType", "order": "ASCENDING" },
                                                      { "fieldPath": "createdAt", "order": "DESCENDING" }] }
 ]
 ```
+
+> **Reconciled (all shipped in `firestore.indexes.json`, Phase 5/6 batch):** the
+> three above cover every multi-field query the code actually runs
+> (`findActiveCode`, the IP rate-limit query, the invite list). The originally
+> planned `user_wallets(earnings)`, `referrals(referrerId,status)`,
+> `referrals(refereeId)` and `transactions(userId,balanceType,createdAt)` were
+> **never needed** by a real query and were **not created** (single-field
+> equility filters are auto-indexed by Firestore). Moderation indexes
+> `prompts(status,updatedAt)` + `prompt_reports(promptId,status,createdAt)` are
+> also in the file.
 
 ## 4. API endpoints (full list)
 
 ### New
 
 ```
-POST   /payments/playbilling/verify      — verify + grant one-time purchase (prompt / deposit / ad-free)
-POST   /payments/playbilling/deposit     — verify + credit a deposit top-up
-POST   /payments/playbilling/ad-free     — verify + grant lifetime ad-free
+POST   /payments/playbilling/verify      — verify + grant one-time purchase (prompt / deposit / ad-free) [dedicated deposit + ad-free routes were NOT created — unified verify dispatches by productId; reconciled]
 POST   /webhooks/google/rtdn             — Play Subscription RTDN
-GET    /wallet                           — wallet breakdown (earnings/deposits/bonus)
-POST   /wallet/allocate                  — choose payment source for a purchase
+GET    /payments/wallet                  — wallet breakdown (earnings/deposits/bonus)
+GET    /payments/wallet/allocate         — ★ read-only: payment-source split preview for an itemPriceInr (builds calculatePaymentSplit; the actual spend endpoint stays deferred — needs the app purchase flow)
+GET    /payments/wallet/bonus-total      — (not separate — breakdown covers it)
 POST   /referrals/code                   — generate my referral code
 GET    /referrals/code                   — get my referral code
 GET    /referrals/:code/validate         — check a code (public)
@@ -169,7 +179,7 @@ GET    /referrals/stats                  — my referral stats
 GET    /referrals/list                   — my invites
 POST   /payments/playbilling/void        — ★ refund/void a purchase (revoke unlock / debit amounts)
 POST   /prompts/:id/like                 — like (toggle, idempotent)
-POST   /prompts/:id/unlike               — unlike (idempotent)
+POST   /prompts/:id/unlike               — unlike (idempotent) [like endpoint toggles both ways; no separate unlike route — reconciled]
 POST   /prompts/:id/share                — shareCount++
 POST   /prompts/:id/report               — report { reason, description? }
 POST   /prompts/:id/appeal               — creator appeal (7-day window)
@@ -177,7 +187,7 @@ GET    /admin/prompts/reports            — moderation queue (admin)
 POST   /admin/prompts/:id/approve        — approve appeal → published
 POST   /admin/prompts/:id/reject         — reject → deleted
 POST   /admin/prompts/:id/dismiss-report — dismiss below threshold (admin)
-PATCH  /admin/wallets/:id                — ★ manual wallet adjustment for refund disputes (admin)
+PATCH  /payments/admin/wallets/:id       — ★ manual wallet adjustment for refund disputes (admin) — note: under /payments/admin, not /admin
 ```
 
 ### Modified
@@ -187,9 +197,9 @@ POST   /payments/subscriptions      → Play Billing subs
 DELETE /payments/subscriptions      → Play Billing cancel
 POST   /payments/payouts            → deduct only withdrawal fee (15%/5%) — no gateway fee
 GET    /payments/payouts/eligibility → show earnings + withdrawal fee percent
-GET    /me/earnings                 → include gateway fees
-GET    /me/transactions             → filter by balanceType
-DELETE /me/account                  → clean up wallet, referral codes
+GET    /me/earnings                 → summary includes full `wallet` breakdown (gateway fees are tracked per-sale, not surfaced in summary — reconciled)
+GET    /me/transactions             → filter by balanceType [backend query is userId+createdAt; client-side filter covers balanceType — reconciled]
+DELETE /me/account                  → cancels sub, removes saved prompts, soft-deletes + redacts profile, removes Firebase Auth. Wallet + referral rows are KEPT for the financial audit trail (consistent with purchases/payouts) — aspirational "clean up wallet/referrals" not applied
 POST   /auth/login                  → accept referralCode + playAccountId; persist signInProvider
 ```
 
@@ -218,7 +228,9 @@ REFERRAL_WELCOME_BONUS_INR=25
 REFERRAL_MAX_PER_USER=100
 REFERRAL_MAX_PER_IP_PER_DAY=5
 BONUS_EXPIRY_DAYS=90
-BONUS_EXPIRY_REMINDER_DAYS=7
+# BONUS_EXPIRY_REMINDER_DAYS  — NOT wired: getBonusExpiringSoon(userId) exists but
+#   no push channel consumes it (needs the app-side push); the daily sweep just
+#   expires vintages. Deferred, not a live gap.
 
 # Wallet
 DEPOSIT_MIN_INR=10
@@ -228,12 +240,13 @@ DEPOSIT_MAX_INR=10000
 PLAY_BILLING_FEE_TOLERANCE_INR=0.01
 
 # Ads & ad-free
-AD_FREE_PRODUCT_ID=ad_free
-AD_FREE_PRICE_INR=149
+# AD_FREE_PRODUCT_ID / AD_FREE_PRICE_INR were NOT wired into code — the SKU id
+# ('ad_free') and price (₹149) live in src/services/payments/products.js
+# (reconciled; env-driven pricing is a future change if ever needed).
 
-# Moderation
-PROMPT_REPORT_THRESHOLD=5
-PROMPT_APPEAL_WINDOW_DAYS=7
+# Moderation  (shipped names — MODERATION_ prefix, reconciled)
+MODERATION_REPORT_THRESHOLD=5
+MODERATION_APPEAL_WINDOW_DAYS=7
 
 # Existing, unchanged
 MIN_WITHDRAWAL_INR=60

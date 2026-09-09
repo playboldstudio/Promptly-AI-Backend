@@ -81,7 +81,7 @@ src/
     image-moderation.service.js # Google Vision SafeSearch → refuse adult/racy on user uploads
     bulk-prompts.service.js  # Admin bulk ZIP/CSV import (validate → upload images → batch writes)
     ledger.js                # Legacy user_balances running balance + writeLedger() helpers
-    wallet.service.js        # ★ Multi-balance wallet: get/credit/debit, FEFO bonus vintages, deposit top-up split, expiry sweep
+    wallet.service.js        # ★ Multi-balance wallet: get/credit/debit, FEFO bonus vintages, deposit top-up split, expiry sweep, admin adjustWallet
     earnings.service.js      # Creator earnings aggregation (wallet-backed)
     rtdn.service.js          # Play Billing RTDN → idempotent log → dispatch by event
     payments/
@@ -180,6 +180,7 @@ Bearer token, **✅+admin** = required token + admin email.
 | POST | `/payments/playbilling/verify` | ✅ | Body `{ productId, purchaseToken, isSubscription? }` → verify Play Billing token + grant. `prompt_<id>` unlocks a prompt (buyer pays price + 5% transaction fee, creator credited **gross** to wallet `earnings`). `pro` / `pro_annual` / `creator` / `creator_annual` activate subscriptions (+ ad-free perk). `ad_free` grants one-time ad-free. `deposit_s/m/l/xl` credit a deposit top-up (**net** after gateway fee → `deposits`, fee recycled as `bonus`). |
 | POST | `/payments/playbilling/void` | ✅ | Body `{ productId, purchaseToken, isSubscription?, reason? }` → refund/void a purchase. Prompt → creator earnings debit (capped); deposit → net refund from deposits; ad-free → revoke unless sub-perk; subscription → mark voided. |
 | GET | `/payments/wallet` | ✅ | Wallet breakdown: `balances` (earnings / deposits / bonus with amounts + spend rules), `totalBalanceInr`, `bonusVintages` (per-credit remaining + expiry) |
+| GET | `/payments/wallet/allocate` | ✅ | **Read-only** payment-source split preview: `?itemPriceInr=N` → per-bucket spend (deposits → earnings → bonus, 10% bonus cap). Builds on `calculatePaymentSplit`; actual spend is deferred |
 | DELETE | `/payments/subscriptions` | ✅ | Cancel active subscription (user also cancels in Play Store) |
 | GET | `/payments/payouts/eligibility` | ✅ | Withdrawable balance, min withdrawal, eligible + blockers |
 | GET | `/payments/payouts` | ✅ | User's payout history |
@@ -187,6 +188,7 @@ Bearer token, **✅+admin** = required token + admin email.
 | GET | `/payments/admin/payouts` | ✅+admin | List payout requests (`?status=pending`) with transfer details |
 | POST | `/payments/admin/payouts/:id/mark-paid` | ✅+admin | Mark a payout paid after manual bank transfer |
 | POST | `/payments/admin/payouts/:id/mark-failed` | ✅+admin | Mark failed; reserved balance returned to creator |
+| PATCH | `/payments/admin/wallets/:id` | ✅+admin | **Manual wallet adjustment** (support/refund disputes). Body `{ balanceType: earnings|deposits|bonus, deltaInr: ±amount, note? }` → credits or debits the bucket through the same primitives as every other write (ledger + FEFO intact) |
 
 ### Referrals
 | Method | Path | Auth | Description |
@@ -261,7 +263,8 @@ manually with `gcloud firestore indexes composite create --database=<db> ...` pe
 `prompts(authorId,createdAt)`, `transactions(userId,createdAt)`, `prompt_purchases(authorId,status)`,
 `prompt_purchases(buyerId,status)`, `saved_prompts(userId,savedAt)`, `payouts(userId,status)`,
 `user_subscriptions(userId,status)`, plus moderation — `prompts(status,updatedAt)`,
-`prompt_reports(promptId,status,createdAt)`.
+`prompt_reports(promptId,status,createdAt)` and referrals —
+`referral_codes(userId,isActive)`, `referrals(ipAddress,createdAt)`, `referrals(referrerId,createdAt)`.
 
 ---
 
@@ -415,9 +418,9 @@ npm run db:seed             # once — starter plans + demo prompts
 npm run db:migrate-wallets  # once — migrate legacy user_balances → user_wallets
 npm run wallet:expire       # daily — bonus vintage expiry sweep (or via Cloud Scheduler)
 npm run dev                 # http://localhost:8080, hot reload
-npm test                    # node:test unit tests (29 tests, no framework dep)
+npm test                    # node:test unit tests (35 tests, no framework dep)
 ```
 
 The Firebase emulator is supported via `FIRESTORE_EMULATOR_HOST`. Tests only exercise pure /
-util modules (CSV, paging, prompt-import, metrics, rate-limit, signatures, withdrawal-fees,
+util modules (CSV, paging, prompt-import, metrics, rate-limit, balance-types, withdrawal-fees,
 moderation-config) — none touch live Firestore.

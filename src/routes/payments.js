@@ -15,7 +15,7 @@ import { voidOneTimePurchase, voidSubscriptionPurchase } from '../services/payme
 import { activateSubscriptionFromToken, cancelActiveSubscription } from '../services/payments/subscriptions.service.js';
 import { isDepositProduct, isAdFreeProduct } from '../services/payments/products.js';
 import { PRODUCT_TO_PLAN } from '../services/payments/plans.js';
-import { getWallet } from '../services/wallet.service.js';
+import { getWallet, adjustWallet, calculatePaymentSplit } from '../services/wallet.service.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { parsePaging } from '../utils/paging.js';
 import { httpError } from '../utils/http-error.js';
@@ -163,6 +163,25 @@ router.get('/wallet', async (req, res, next) => {
   }
 });
 
+/**
+ * GET /payments/wallet/allocate?itemPriceInr=99 — the payment-source split for an
+ * item price: how much comes from each wallet bucket (deposits → earnings →
+ * bonus, with the 10% bonus spend cap). Read-only preview — the app shows this
+ * before the Play Billing purchase. The actual spend happens at a later phase.
+ */
+router.get('/wallet/allocate', async (req, res, next) => {
+  try {
+    const itemPriceInr = Number(req.query.itemPriceInr);
+    if (!Number.isFinite(itemPriceInr) || itemPriceInr <= 0) {
+      return next(httpError(400, 'itemPriceInr must be a positive number'));
+    }
+    const result = await calculatePaymentSplit(req.userId, itemPriceInr);
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
 const payoutSchema = z.object({ amountInr: z.number().int().positive() });
 
 /**
@@ -249,6 +268,38 @@ router.post('/admin/payouts/:id/mark-failed', moneyLimiter, requireAdmin, async 
     const result = await markPayoutFailed({
       payoutId: req.params.id,
       reason: req.body?.reason,
+    });
+    if (result.error) return next(httpError(result.error.status, result.error.message));
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * PATCH /payments/admin/wallets/:id — manual wallet adjustment (support /
+ * refund-dispute tooling, plans/moderation.md §7).
+ * Body: { balanceType: 'earnings'|'deposits'|'bonus', deltaInr: ±amount, note? }.
+ * Positive deltaInr credits, negative debits. Runs through the same
+ * credit/debit primitives as every other write (ledger row + FEFO intact).
+ */
+const walletAdjustSchema = z.object({
+  balanceType: z.enum(['earnings', 'deposits', 'bonus']),
+  deltaInr: z.number().finite().refine((n) => n !== 0, 'deltaInr must be non-zero'),
+  note: z.string().trim().max(300).optional(),
+});
+
+router.patch('/admin/wallets/:id', moneyLimiter, requireAdmin, async (req, res, next) => {
+  try {
+    const parsed = walletAdjustSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return next(httpError(400, parsed.error.issues[0]?.message ?? 'Invalid adjustment body'));
+    }
+    const result = await adjustWallet({
+      userId: req.params.id,
+      balanceType: parsed.data.balanceType,
+      deltaInr: parsed.data.deltaInr,
+      note: parsed.data.note,
     });
     if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json(result);
