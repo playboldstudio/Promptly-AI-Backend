@@ -27,6 +27,9 @@ const COLLECTIONS = Object.freeze({
   userWallets: 'user_wallets',
   bankAccounts: 'bank_accounts',
   kycVerifications: 'kyc_verifications',
+  referralCodes: 'referral_codes',
+  referrals: 'referrals',
+  deviceFingerprints: 'device_fingerprints',
 });
 
 export const COLS = COLLECTIONS;

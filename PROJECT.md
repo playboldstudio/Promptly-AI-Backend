@@ -71,7 +71,7 @@ src/
     notFound.js              # 404 handler
     rateLimit.js             # In-memory per-IP/uid sliding-window limiter
   routes/                    # HTTP layer — thin; validates input, delegates to services
-    health.js  auth.js  prompts.js  me.js  admin-prompts.js  payments.js  rtdn.js
+    health.js  auth.js  prompts.js  me.js  admin-prompts.js  payments.js  referrals.js  rtdn.js
   services/                  # Business logic + all Firestore/Storage reads & writes
     prompts.service.js       # list/detail/save/unsave/create/delete prompts, daily-post gate
     prompt-metrics.js        # Derived isTrending / isNew flags
@@ -92,6 +92,8 @@ src/
       payouts.service.js     # Manual-settle withdrawals (wallet earnings as source of truth)
       plans.js               # BUILTIN_PLANS fallback + plan lookups
       subscription-utils.js  # active-subscription + fee helpers
+    referrals/
+      referral.service.js   # ★ Referral program: generate/validate/apply (bonus credits) + stats/list
   scripts/
     expireBonus.js           # npm run wallet:expire — daily bonus vintage expiry sweep
     reconcile.js             # npm run reconcile — monthly Play Billing commission reconciliation
@@ -180,6 +182,16 @@ Bearer token, **✅+admin** = required token + admin email.
 | POST | `/payments/admin/payouts/:id/mark-paid` | ✅+admin | Mark a payout paid after manual bank transfer |
 | POST | `/payments/admin/payouts/:id/mark-failed` | ✅+admin | Mark failed; reserved balance returned to creator |
 
+### Referrals
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/referrals/code` | ✅ | Get my referral code (creates one if absent) |
+| POST | `/referrals/code` | ✅ | Generate a referral code |
+| GET | `/referrals/:code/validate` | – | Validate a code before signup (returns referrer name) |
+| POST | `/referrals/apply` | ✅ | Apply a code (oAuth-only gate). Credits both sides as `bonus` |
+| GET | `/referrals/stats` | ✅ | Invites, bonus earned, remaining slots |
+| GET | `/referrals/list` | ✅ | My invites (newest first) |
+
 ### Admin bulk import
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -212,6 +224,9 @@ source of truth in `src/db/firestoreRepo.js` (`COLS`).
 | `payouts` | Withdrawal requests. Status: `pending / processing / paid / failed` |
 | `saved_prompts` | Join table. Id `(userId, promptId)` |
 | `user_balances` | **Legacy** running INR balance per user — superseded by `user_wallets` (migrated via `npm run db:migrate-wallets`) |
+| `referral_codes` | Referral codes. Id = code. `code, userId, isActive` |
+| `referrals` | Completed referrals. Deterministic id `(referrerId, refereeId)`. `referrerId, refereeId, code, status, bonusCredited, ipAddress` |
+| `device_fingerprints` | Play Account ID linkage for anti-fraud. Id `(playAccountId, userId)`. `userId, playAccountId, ipAddress` |
 | `user_posts` | Daily post-count tracking for the plan gate |
 | `bank_accounts` | Creator bank transfer details (payout) |
 | `kyc_verifications` | KYC image references |
@@ -319,6 +334,10 @@ Paid prompts   Buyer ──(₹ = price + 5% tx fee)───────► Pla
 | `DEPOSIT_MIN_INR` / `DEPOSIT_MAX_INR` | Deposit pack bounds (default 10 / 10000) |
 | `BONUS_EXPIRY_DAYS` | Bonus credit expiry (default 90) |
 | `PLAY_BILLING_FEE_TOLERANCE_INR` | Reconciliation tolerance (default 0.01) |
+| `REFERRAL_BONUS_INR` | Referrer bonus per successful referral (default 50) |
+| `REFERRAL_WELCOME_BONUS_INR` | Referee welcome bonus (default 25) |
+| `REFERRAL_MAX_PER_USER` | Max referrals per referrer (default 100) |
+| `REFERRAL_MAX_PER_IP_PER_DAY` | Max referrals from one IP per day (default 5) |
 
 **Security hygiene:** never commit `.env` or service-account key files (gitignored). On Cloud Run,
 secret values are pulled from Secret Manager at deploy time.

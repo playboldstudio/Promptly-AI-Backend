@@ -9,6 +9,7 @@ import promptsRouter from './routes/prompts.js';
 import adminPromptsRouter from './routes/admin-prompts.js';
 import meRouter from './routes/me.js';
 import paymentsRouter from './routes/payments.js';
+import referralsRouter from './routes/referrals.js';
 import rtdnRouter from './routes/rtdn.js';
 import { notFound } from './middleware/notFound.js';
 import { errorHandler } from './middleware/errorHandler.js';
@@ -50,6 +51,7 @@ export function createApp() {
   app.use(adminPromptsRouter);
   app.use('/me', meRouter);
   app.use('/payments', paymentsRouter);
+  app.use('/referrals', referralsRouter);
 
   app.use(notFound);
   app.use(errorHandler);

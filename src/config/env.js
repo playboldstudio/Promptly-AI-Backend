@@ -34,6 +34,12 @@ const envSchema = z.object({
   DEPOSIT_MAX_INR: z.coerce.number().int().positive().default(10000),
   BONUS_EXPIRY_DAYS: z.coerce.number().int().positive().default(90),
   PLAY_BILLING_FEE_TOLERANCE_INR: z.coerce.number().positive().default(0.01),
+
+  // Referral program (plans/referrals.md)
+  REFERRAL_BONUS_INR: z.coerce.number().int().positive().default(50),    // referrer
+  REFERRAL_WELCOME_BONUS_INR: z.coerce.number().int().positive().default(25), // referee
+  REFERRAL_MAX_PER_USER: z.coerce.number().int().positive().default(100),
+  REFERRAL_MAX_PER_IP_PER_DAY: z.coerce.number().int().positive().default(5),
 });
 
 const parsed = envSchema.safeParse(process.env);

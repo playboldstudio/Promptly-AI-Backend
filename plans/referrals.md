@@ -228,13 +228,13 @@ GET    /referrals/list          — My invites (authenticated)
 ## 8. Implementation order
 
 ```
-[ ] Persist signInProvider on users doc (auth middleware)
-[ ] referral_codes + referrals + device_fingerprints collections
-[ ] referral.service.js (generate/validate/apply/stats/list)
-[ ] POST /auth/login wiring (oAuth gate)
-[ ] referral API endpoints
-[ ] bonus crediting via creditBonus (vintage-aware)
-[ ] Test: happy path + abuse attempts (own-code, IP flood, dup Play Account)
+[x] Persist signInProvider on users doc (auth middleware + login)
+[x] referral_codes + referrals + device_fingerprints collections
+[x] referral.service.js (generate/validate/apply/stats/list)
+[x] POST /auth/login wiring (oAuth gate)
+[x] referral API endpoints
+[x] bonus crediting via creditBonus (vintage-aware)
+[ ] Test: happy path + abuse attempts (own-code, IP flood, dup Play Account)   ← APP-SIDE (see APP_INTEGRATION.md §2)
 ```
 
 ## 9. Open questions

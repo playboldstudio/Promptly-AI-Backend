@@ -131,6 +131,12 @@ RTDN topic pointing at `https://<cloud-run-url>/webhooks/google/rtdn`.
 | GET | `/payments/admin/payouts` | ✅ + admin | **Admin.** List payout requests with UPI details. `?status=pending`. Requires `ADMIN_EMAILS` (403 otherwise). |
 | POST | `/payments/admin/payouts/:id/mark-paid` | ✅ | **Admin.** Mark a pending payout `paid` after you've transferred the money. |
 | POST | `/payments/admin/payouts/:id/mark-failed` | ✅ | **Admin.** Mark a payout `failed`; the reserved balance is returned to the creator. |
+| GET | `/referrals/code` | ✅ | Get my referral code (creates one if absent). |
+| POST | `/referrals/code` | ✅ | Generate my referral code. |
+| GET | `/referrals/:code/validate` | – | Validate a referral code before signup. |
+| POST | `/referrals/apply` | ✅ | Apply a referral code (oAuth-only). |
+| GET | `/referrals/stats` | ✅ | My referral stats (invites, bonus earned, remaining slots). |
+| GET | `/referrals/list` | ✅ | My invite list. |
 | POST | `/webhooks/google/rtdn` | – | **Play Billing RTDN.** Parse Pub/Sub message, dedupe via `webhook_events`, dispatch subscription lifecycle (renewed/canceled/expired). Always 200. |
 
 Auth uses **Firebase Auth**: the client sends a verified ID token as
@@ -222,7 +228,8 @@ reverses the reservation.
 Firestore collections (schema-less; see `src/db/firestoreRepo.js` for the
 collection names): `users`, `subscription_plans`, `user_subscriptions`, `prompts`,
 `prompt_purchases`, `transactions`, `payouts`, `saved_prompts`,
-`user_balances` (legacy), **`user_wallets`** (multi-balance wallet), plus
+`user_balances` (legacy), **`user_wallets`** (multi-balance wallet),
+`referral_codes` / `referrals` / `device_fingerprints` (referral program), plus
 `webhook_events` for idempotent Play Billing RTDN replay.
 
 Key invariants enforced by the service layer:
@@ -265,9 +272,11 @@ src/
   routes/                # HTTP layer — thin, delegates to services
   scripts/
     expireBonus.js       # npm run wallet:expire (bonus vintage expiry sweep)
+    reconcile.js         # npm run reconcile (monthly Play Billing fee reconciliation)
   services/              # business logic + all Firestore queries
     ledger.js            # legacy running balance (user_balances) + writeLedger() helpers
     wallet.service.js    # multi-balance wallet: get/credit/debit, FEFO bonus, deposit top-up split, expiry
+    referrals/           # referral program: generate/validate/apply (bonus credits) + stats/list
     prompt-metrics.js    # derived isTrending / isNew from counts + age
     earnings.service.js  # creator earnings aggregation (wallet-backed)
     rtdn.service.js      # Play Billing RTDN → idempotent log (dedupe doc id) → dispatch

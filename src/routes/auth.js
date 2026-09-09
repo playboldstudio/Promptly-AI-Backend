@@ -4,12 +4,20 @@ import { firebaseAuth } from '../db/firestore.js';
 import { COLS, findByPk, queryAll, upsert } from '../db/firestoreRepo.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { httpError } from '../utils/http-error.js';
+import {
+  applyReferralCode,
+  isOAuthSignIn,
+} from '../services/referrals/referral.service.js';
 
 const router = Router();
 
 const loginLimiter = rateLimit({ windowMs: 60_000, max: 30, message: 'Too many login attempts — try again shortly' });
 
-const loginSchema = z.object({ idToken: z.string().min(1) });
+const loginSchema = z.object({
+  idToken: z.string().min(1),
+  referralCode: z.string().optional().default(''),
+  playAccountId: z.string().optional().default(''),
+});
 
 router.post('/auth/login', loginLimiter, async (req, res, next) => {
   try {
@@ -20,19 +28,46 @@ router.post('/auth/login', loginLimiter, async (req, res, next) => {
     const uid = decoded.uid;
     const existing = await findByPk(COLS.users, uid);
 
+    const signInProvider = decoded.firebase?.sign_in_provider ?? existing?.signInProvider ?? null;
+
     const patch = {
       authProviderId: uid,
       email: decoded.email ?? existing?.email ?? '',
       fullName:
         decoded.name ?? decoded.displayName ?? existing?.fullName ?? decoded.email?.split('@')[0] ?? 'User',
       avatarUrl: decoded.picture ?? decoded.photoURL ?? existing?.avatarUrl ?? null,
+      signInProvider,
       updatedAt: new Date(),
     };
     if (!existing) patch.createdAt = new Date();
     await upsert(COLS.users, uid, patch);
 
+    // ── Referral: apply an invite code on signup (oAuth-only, graceful skip).
+    // Non-oAuth sign-ins and invalid codes log in fine but the bonus isn't
+    // given — the referral is best-effort and never blocks login.
+    let referral = null;
+    if (parsed.data.referralCode) {
+      const user = { signInProvider };
+      if (!isOAuthSignIn(user)) {
+        console.warn('Referral skipped — non-oAuth sign-in', uid);
+      } else {
+        const result = await applyReferralCode({
+          refereeId: uid,
+          code: parsed.data.referralCode,
+          playAccountId: parsed.data.playAccountId || null,
+          ipAddress: req.ip,
+        });
+        if (result.error) {
+          console.warn('Referral apply failed:', result.error.message);
+          referral = { applied: false, reason: result.error.message };
+        } else {
+          referral = { applied: true, ...result };
+        }
+      }
+    }
+
     const user = await findByPk(COLS.users, uid);
-    return res.json({ user, token: parsed.data.idToken });
+    return res.json({ user, token: parsed.data.idToken, referral });
   } catch (err) {
     // Token invalid/expired — surface as 401.
     return next(httpError(401, 'Your sign-in has expired. Please sign in again'));
