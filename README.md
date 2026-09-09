@@ -283,6 +283,7 @@ src/
     payments/            # Play Billing: prompt unlocks, deposits, ad-free, subscriptions, payouts
       products.js        # One-time product catalog (ad_free, deposit_*)
       balance-types.js   # BALANCE_TYPES: earnings / deposits / bonus + spend rules & priority
+      withdrawal-fees.js # Withdrawal fee math (pure, unit-tested) — 15% Pro / 5% Creator
       plans.js           # Built-in plans (free/pro/pro_annual/creator/creator_annual) + map
 ```
 

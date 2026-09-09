@@ -90,6 +90,7 @@ src/
       void.service.js        # ★ Refund/void handler: prompt (earnings debit), deposit (net refund), ad-free (revoke), subscription (mark voided)
       subscriptions.service.js # Play Billing token activation + cancel + RTDN lifecycle
       payouts.service.js     # Manual-settle withdrawals (wallet earnings as source of truth)
+      withdrawal-fees.js     # ★ Withdrawal fee math (pure, unit-tested) — 15% Pro / 5% Creator only
       plans.js               # BUILTIN_PLANS fallback + plan lookups
       subscription-utils.js  # active-subscription + fee helpers
     referrals/
@@ -396,7 +397,7 @@ npm run db:seed             # once — starter plans + demo prompts
 npm run db:migrate-wallets  # once — migrate legacy user_balances → user_wallets
 npm run wallet:expire       # daily — bonus vintage expiry sweep (or via Cloud Scheduler)
 npm run dev                 # http://localhost:8080, hot reload
-npm test                    # node:test unit tests (20 tests, no framework dep)
+npm test                    # node:test unit tests (25 tests, no framework dep)
 ```
 
 The Firebase emulator is supported via `FIRESTORE_EMULATOR_HOST`. Tests only exercise pure /

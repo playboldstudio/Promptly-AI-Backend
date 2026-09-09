@@ -37,6 +37,8 @@ WITHDRAWAL (initiated by creator):
 // Play Billing's commission is absorbed by the platform at payment time.
 // The 5% buyer transaction fee was collected at purchase and is app income,
 // not part of this balance.
+// BUILT: src/services/payments/withdrawal-fees.js (pure, unit-tested)
+//   + used by payouts.service.js at request + eligibility preview.
 export function calculateWithdrawal({ earningsBalance, platformFeePercent }) {
   const platformFeeInr = Math.round((earningsBalance * platformFeePercent) / 100);
   const netPayout = earningsBalance - platformFeeInr;

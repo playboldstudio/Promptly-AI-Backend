@@ -3,16 +3,12 @@ import { runTransaction } from '../../db/config.js';
 import { env } from '../../config/env.js';
 import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 import { getWallet } from '../wallet.service.js';
+import { calculateWithdrawal } from './withdrawal-fees.js';
 
 const MIN_WITHDRAWAL_INR = env.MIN_WITHDRAWAL_INR;
 
 function err(status, message) {
   return { error: { status, message } };
-}
-
-/** Money precision: rupees with paise — never more than 2 decimals. */
-function toMoney(value) {
-  return Math.round(value * 100) / 100;
 }
 
 /**
@@ -34,40 +30,20 @@ function bankDetailsComplete(user) {
 }
 
 /**
- * Fee breakdown for a withdrawal. The ONLY deduction is the seller's platform
- * fee — 15% (Pro seller) / 5% (Creator seller) — taken when the creator
- * initiates a payout. The Play Billing commission was absorbed by the platform
- * at payment time and the 5% buyer transaction fee was app income at purchase;
- * neither is re-deducted here (see plans/withdrawals.md).
- *
- * Every value is kept to 2 decimal places (paise precision). The admin pays
- * `netInr` to the creator's bank, the platform keeps the rest.
- */
-function payoutFees(amountInr, platformFeePercent = 0) {
-  const platformFeeInr = toMoney((amountInr * (platformFeePercent || 0)) / 100);
-  const feeInr = platformFeeInr;
-  return {
-    platformFeeInr,
-    feeInr,
-    netInr: toMoney(amountInr - feeInr),
-  };
-}
-
-/**
  * True withdrawable balance — the creator's wallet `earnings` (money from paid
- * prompt sales, credited gross), minus what has already been withdrawn or is
- * reserved by an in-flight payout. The wallet is the single source of truth for
- * the withdrawable figure; `user_balances` is only the legacy buyer-currency row.
+ * prompt sales, credited gross). `requestPayout` debits the full requested
+ * amount from `earnings` at payout creation and `markPayoutFailed` credits it
+ * back, so the wallet ALREADY nets out every outstanding payout — subtracting
+ * payout rows again would double-count them. The wallet is the single source
+ * of truth for the withdrawable figure; `user_balances` is only the legacy
+ * buyer-currency row.
  *
  * Returns a non-negative amount. When no wallet exists yet (fresh user before
  * the Phase 2 migration), the legacy `user_balances.balanceInr` is consulted so
  * existing creators' balances survive the transition.
  */
 export async function withdrawableBalanceFor(userId) {
-  const [wallet, payouts] = await Promise.all([
-    getWallet(userId),
-    queryAll({ collection: COLS.payouts, filters: [{ field: 'userId', value: userId }] }),
-  ]);
+  const wallet = await getWallet(userId);
 
   let earnedInr = wallet.balances?.earnings?.amountInr ?? 0;
 
@@ -77,11 +53,7 @@ export async function withdrawableBalanceFor(userId) {
     earnedInr = Number(legacy?.balanceInr ?? 0);
   }
 
-  const reservedInr = payouts.rows
-    .filter((p) => ['pending', 'processing', 'paid'].includes(p.status))
-    .reduce((sum, p) => sum + (Number(p.amountInr) || 0), 0);
-
-  return Math.max(0, earnedInr - reservedInr);
+  return Math.max(0, earnedInr);
 }
 
 /**
@@ -108,7 +80,7 @@ export async function withdrawalEligibility(userId) {
   if (!hasBankDetails) blockers.push('Add your bank details (PAN + account) on your profile before withdrawing');
   if (!meetsMinimum) blockers.push(`Earnings below the ₹${MIN_WITHDRAWAL_INR} withdrawal minimum`);
 
-  const fees = payoutFees(withdrawable, platformFeePercent);
+  const fees = calculateWithdrawal({ earningsBalance: withdrawable, platformFeePercent });
 
   return {
     withdrawableBalance: withdrawable,
@@ -147,7 +119,10 @@ export async function requestPayout({ userId, amountInr }) {
   }
 
   // Fee breakdown: only the plan's withdrawal (platform) fee, deducted from payout.
-  const fees = payoutFees(amountInr, sub?.plan?.platformFeePercent ?? 0);
+  const fees = calculateWithdrawal({
+    earningsBalance: amountInr,
+    platformFeePercent: sub?.plan?.platformFeePercent ?? 0,
+  });
 
   // GATE 2 — the creator needs a saved bank-transfer destination + KYC docs.
   if (!bankDetailsComplete(user)) {
@@ -181,14 +156,13 @@ export async function requestPayout({ userId, amountInr }) {
         throw Object.assign(new Error('in-flight'), { inFlight: true });
       }
 
-      // Re-count the reserved amount inside the transaction (authoritative):
-      // wallet earnings minus pending/processing/paid payouts.
+      // Authoritative balance check inside the transaction. The wallet `earnings`
+      // already nets out every prior payout (they were debited at creation and
+      // only credited back on failure), so no amount is subtracted for existing
+      // rows — only this new payout reduces the balance below.
       const walletInTx = await inTxGet(tx, COLS.userWallets, userId);
       const earningsInTx = Number(walletInTx?.earnings ?? 0);
-      const reservedInTx = payoutsInTx
-        .filter((p) => ['pending', 'processing', 'paid'].includes(p.status))
-        .reduce((sum, p) => sum + (Number(p.amountInr) || 0), 0);
-      const withdrawableInTx = Math.max(0, earningsInTx - reservedInTx);
+      const withdrawableInTx = Math.max(0, earningsInTx);
       if (amountInr > withdrawableInTx) {
         throw Object.assign(new Error('insufficient'), { insufficient: true });
       }

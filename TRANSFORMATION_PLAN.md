@@ -20,7 +20,7 @@
 | Play Billing + RTDN + refunds | [`plans/play-billing.md`](plans/play-billing.md) | ✅ Built (backend complete; end-to-end test pending app track) |
 | Multi-balance wallet + FEFO bonus | [`plans/wallet.md`](plans/wallet.md) | ✅ Built |
 | Referral + oAuth anti-abuse | [`plans/referrals.md`](plans/referrals.md) | ✅ Built |
-| Withdrawal fee model | [`plans/withdrawals.md`](plans/withdrawals.md) | 🚧 Draft |
+| Withdrawal fee model | [`plans/withdrawals.md`](plans/withdrawals.md) | ✅ Built |
 | ~~Web checkout (Razorpay)~~ | ~~`plans/web-checkout.md`~~ | ❌ Removed (Play Billing only) |
 | Ads & ad-free | [`plans/ads-adfree.md`](plans/ads-adfree.md) | 🚧 Draft |
 | Moderation & engagement | [`plans/moderation.md`](plans/moderation.md) | 🚧 Draft |

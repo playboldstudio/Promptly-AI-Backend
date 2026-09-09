@@ -12,7 +12,7 @@ independently and can be built in isolation.
 | [play-billing.md](play-billing.md) | Play Billing integration (purchases, subscriptions, RTDN, refunds) | ✅ Built | Phase 1 |
 | [wallet.md](wallet.md) | Multi-balance wallet (earnings / deposits / bonus) + FEFO bonus expiry | ✅ Built | Phase 2 |
 | [referrals.md](referrals.md) | Referral program + oAuth-only signup + anti-abuse | ✅ Built | Phase 3 |
-| [withdrawals.md](withdrawals.md) | Withdrawal model (only platform fee deducted at payout — no gateway fee) | 🚧 Draft | Phase 4 |
+| [withdrawals.md](withdrawals.md) | Withdrawal model (only platform fee deducted at payout — no gateway fee) | ✅ Built | Phase 4 |
 | ~~[web-checkout.md](web-checkout.md)~~ | ~~Razorpay web checkout (dual gateway)~~ | ❌ Removed | — |
 | [ads-adfree.md](ads-adfree.md) | Ads & one-time ad-free purchase | 🚧 Draft | Phase 5 |
 | [moderation.md](moderation.md) | Prompt engagement & report→appeal→admin moderation | 🚧 Draft | Phase 6 |
