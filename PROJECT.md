@@ -81,7 +81,8 @@ src/
     image-moderation.service.js # Google Vision SafeSearch → refuse adult/racy on user uploads
     bulk-prompts.service.js  # Admin bulk ZIP/CSV import (validate → upload images → batch writes)
     ledger.js                # Legacy user_balances running balance + writeLedger() helpers
-    wallet.service.js        # ★ Multi-balance wallet: get/credit/debit, FEFO bonus vintages, deposit top-up split, expiry sweep, admin adjustWallet
+    wallet.service.js        # ★ Multi-balance wallet: get/credit/debit, FEFO bonus vintages, deposit top-up split, expiry sweep, admin adjustWallet, wallet spend (payment source)
+    notifications.service.js # in-app inbox — bonus-expiry reminders (wallet.md §5.4)
     earnings.service.js      # Creator earnings aggregation (wallet-backed)
     rtdn.service.js          # Play Billing RTDN → idempotent log → dispatch by event
     payments/
@@ -163,6 +164,8 @@ Bearer token, **✅+admin** = required token + admin email.
 | GET | `/me/prompts` | ✅ | Prompts the user has published |
 | GET | `/me/saved` | ✅ | Saved prompts (join table, newest first) |
 | GET | `/me/transactions` | ✅ | My Account ledger rows |
+| GET | `/me/notifications` | ✅ | In-app inbox (bonus-expiry reminders). `?unreadOnly=&limit=&offset=` |
+| POST | `/me/notifications/read` | ✅ | Mark my notifications read — `{ ids: string[] }`, only own rows |
 | GET | `/me/purchases` | ✅ | Prompts the user has bought/unlocked |
 | GET | `/me/earnings` | ✅ | Earnings summary (lifetime, withdrawn, pending, balance) |
 | GET | `/me/earnings/prompts` | ✅ | Per-prompt earnings breakdown |
@@ -180,7 +183,8 @@ Bearer token, **✅+admin** = required token + admin email.
 | POST | `/payments/playbilling/verify` | ✅ | Body `{ productId, purchaseToken, isSubscription? }` → verify Play Billing token + grant. `prompt_<id>` unlocks a prompt (buyer pays price + 5% transaction fee, creator credited **gross** to wallet `earnings`). `pro` / `pro_annual` / `creator` / `creator_annual` activate subscriptions (+ ad-free perk). `ad_free` grants one-time ad-free. `deposit_s/m/l/xl` credit a deposit top-up (**net** after gateway fee → `deposits`, fee recycled as `bonus`). |
 | POST | `/payments/playbilling/void` | ✅ | Body `{ productId, purchaseToken, isSubscription?, reason? }` → refund/void a purchase. Prompt → creator earnings debit (capped); deposit → net refund from deposits; ad-free → revoke unless sub-perk; subscription → mark voided. |
 | GET | `/payments/wallet` | ✅ | Wallet breakdown: `balances` (earnings / deposits / bonus with amounts + spend rules), `totalBalanceInr`, `bonusVintages` (per-credit remaining + expiry) |
-| GET | `/payments/wallet/allocate` | ✅ | **Read-only** payment-source split preview: `?itemPriceInr=N` → per-bucket spend (deposits → earnings → bonus, 10% bonus cap). Builds on `calculatePaymentSplit`; actual spend is deferred |
+| GET | `/payments/wallet/allocate` | ✅ | **Read-only** payment-source split preview: `?itemPriceInr=N` → per-bucket spend (deposits → earnings → bonus, 10% bonus cap). Builds on `calculatePaymentSplit` |
+| POST | `/payments/wallet/spend` | ✅ | **Spend wallet balances** as payment source. Body `{ itemPriceInr, refId, note? }`; debits the split (deposits → earnings → bonus, 10% cap), returns `totalCovered` + `remaining` residual. **Idempotent by `refId`** |
 | DELETE | `/payments/subscriptions` | ✅ | Cancel active subscription (user also cancels in Play Store) |
 | GET | `/payments/payouts/eligibility` | ✅ | Withdrawable balance, min withdrawal, eligible + blockers |
 | GET | `/payments/payouts` | ✅ | User's payout history |
@@ -418,9 +422,9 @@ npm run db:seed             # once — starter plans + demo prompts
 npm run db:migrate-wallets  # once — migrate legacy user_balances → user_wallets
 npm run wallet:expire       # daily — bonus vintage expiry sweep (or via Cloud Scheduler)
 npm run dev                 # http://localhost:8080, hot reload
-npm test                    # node:test unit tests (35 tests, no framework dep)
+npm test                    # node:test unit tests (44 tests, no framework dep)
 ```
 
 The Firebase emulator is supported via `FIRESTORE_EMULATOR_HOST`. Tests only exercise pure /
 util modules (CSV, paging, prompt-import, metrics, rate-limit, balance-types, withdrawal-fees,
-moderation-config) — none touch live Firestore.
+moderation-config, wallet-spend split, notifications) — none touch live Firestore.

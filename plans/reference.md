@@ -9,6 +9,8 @@
 ```javascript
 // COLS additions in firestoreRepo.js — the collections that actually shipped:
 userWallets:        'user_wallets',        // multi-balance wallet (Phase 2)
+walletSpends:       'wallet_spends',       // idempotency claims for wallet spend (Phase 2)
+notifications:      'notifications',       // in-app inbox (bonus-expiry reminder, Phase 2)
 referralCodes:      'referral_codes',      // referral codes (Phase 3)
 referrals:          'referrals',           // referral records (Phase 3)
 deviceFingerprints: 'device_fingerprints', // anti-abuse Play Account ID (Phase 3)
@@ -169,7 +171,10 @@ promptReports:      'prompt_reports',      // report join table (Phase 6)
 POST   /payments/playbilling/verify      — verify + grant one-time purchase (prompt / deposit / ad-free) [dedicated deposit + ad-free routes were NOT created — unified verify dispatches by productId; reconciled]
 POST   /webhooks/google/rtdn             — Play Subscription RTDN
 GET    /payments/wallet                  — wallet breakdown (earnings/deposits/bonus)
-GET    /payments/wallet/allocate         — ★ read-only: payment-source split preview for an itemPriceInr (builds calculatePaymentSplit; the actual spend endpoint stays deferred — needs the app purchase flow)
+GET    /payments/wallet/allocate         — read-only: payment-source split preview for an itemPriceInr (builds calculatePaymentSplit)
+POST   /payments/wallet/spend            — ★ the actual spend: debit wallet balances (deposits → earnings → bonus, 10% cap) as the payment source for an item; partial-coverage (returns `remaining` residual paid via Play Billing); idempotent by refId
+GET    /me/notifications                 — inbox, newest-first + unreadOnly + paging
+POST   /me/notifications/read            — mark my notifications read ({ ids })
 GET    /payments/wallet/bonus-total      — (not separate — breakdown covers it)
 POST   /referrals/code                   — generate my referral code
 GET    /referrals/code                   — get my referral code
@@ -228,9 +233,9 @@ REFERRAL_WELCOME_BONUS_INR=25
 REFERRAL_MAX_PER_USER=100
 REFERRAL_MAX_PER_IP_PER_DAY=5
 BONUS_EXPIRY_DAYS=90
-# BONUS_EXPIRY_REMINDER_DAYS  — NOT wired: getBonusExpiringSoon(userId) exists but
-#   no push channel consumes it (needs the app-side push); the daily sweep just
-#   expires vintages. Deferred, not a live gap.
+# BONUS_EXPIRY_REMINDER_DAYS  — wired as an in-app inbox (no FCM push needed):
+#   GET /me/notifications (app polls at launch) + daily wallet:expire sweep fills
+#   the inbox via getBonusExpiryReminder. Push alternative deferred (APP_INTEGRATION.md §3).
 
 # Wallet
 DEPOSIT_MIN_INR=10

@@ -130,12 +130,15 @@ RTDN topic pointing at `https://<cloud-run-url>/webhooks/google/rtdn`.
 | GET | `/me/prompts` | ✅ | Prompts the user has published |
 | GET | `/me/saved` | ✅ | Saved prompts (join table) |
 | GET | `/me/transactions` | ✅ | **My Account** ledger (from `transactions`) |
+| GET | `/me/notifications` | ✅ | **Inbox** (bonus-expiry reminders). `?unreadOnly=true&limit=&offset=`. Newest-first. |
+| POST | `/me/notifications/read` | ✅ | Mark my notifications read. Body `{ ids: string[] }` — only the caller's own rows are touched. |
 | GET | `/me/earnings` | ✅ | Creator earnings summary (lifetime, withdrawn, pending, balance) |
 | GET | `/me/earnings/prompts` | ✅ | Per-prompt earnings breakdown |
 | POST | `/payments/playbilling/verify` | ✅ | Verify a Play Billing purchase token + grant. Body `{ productId, purchaseToken, isSubscription? }`. `prompt_<id>` → paid prompt unlock (buyer pays price + 5% transaction fee; creator credited **gross** to wallet `earnings`). `pro`/`pro_annual`/`creator`/`creator_annual` → activate subscription (+ ad-free perk). `ad_free` → one-time ad-free. `deposit_s/m/l/xl` → deposit top-up (net after gateway fee → `deposits`, fee recycled as `bonus`). |
 | POST | `/payments/playbilling/void` | ✅ | Refund/void a purchase. Body `{ productId, purchaseToken, isSubscription?, reason? }`. Reverses grant: prompt → creator earnings debit; deposit → net refund from deposits; ad-free → revoke (unless sub-perk); subscription → mark voided. |
 | GET | `/payments/wallet` | ✅ | Wallet breakdown: `balances` (earnings / deposits / bonus with amounts + spend rules), `totalBalanceInr`, `bonusVintages` |
-| GET | `/payments/wallet/allocate` | ✅ | **Read-only** payment-source split for an item price: `?itemPriceInr=99` → how much comes from each wallet bucket (deposits → earnings → bonus, 10% bonus cap). Preview only — actual spend is deferred. |
+| GET | `/payments/wallet/allocate` | ✅ | **Read-only** payment-source split for an item price: `?itemPriceInr=99` → how much comes from each wallet bucket (deposits → earnings → bonus, 10% bonus cap). |
+| POST | `/payments/wallet/spend` | ✅ | **Spend wallet balances** as a payment source toward an item. Body `{ itemPriceInr, refId, note? }`. Debits exactly the wallet split (deposits → earnings → bonus, 10% cap); returns `totalCovered` + `remaining` (the residual paid via Play Billing). **Idempotent by `refId`** — replays return the same result, no double-debit. |
 | POST | `/payments/payouts` | ✅ | Request a withdrawal (**manual settle**, min ₹60). Body `{ amountInr }`. Requires saved bank details; deducts only the withdrawal fee (15% Pro / 5% Creator), reserves the balance as `pending`. |
 | GET | `/payments/admin/payouts` | ✅ + admin | **Admin.** List payout requests with UPI details. `?status=pending`. Requires `ADMIN_EMAILS` (403 otherwise). |
 | POST | `/payments/admin/payouts/:id/mark-paid` | ✅ | **Admin.** Mark a pending payout `paid` after you've transferred the money. |

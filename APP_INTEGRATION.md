@@ -21,14 +21,19 @@ POST /auth/login
 {
   "idToken": "<firebase-auth-id-token>",
   // Referral Phase 3 (see §2): optional — only needed at signup
-  "referralCode": "WORTHY-TIGER-1",      // ◐ not yet processed
-  "playAccountId": "<1.2.9408901...>",   // ◐ not yet stored/used
+  "referralCode": "WORTHY-TIGER-1",      // ✅ processed server-side (Phase 3)
+  "playAccountId": "<1.2.9408901...>",   // ✅ stored + used for anti-abuse (Phase 3)
 }
 ```
 
 Backend stores `signInProvider` from the decoded token
 (`decoded.firebase.sign_in_provider`) for the oAuth-only referral gate. **Nothing
 to do app-side to send it** — it's already derived server-side.
+
+When `referralCode` is present at signup, the backend applies it
+(`applyReferralCode`, oAuth-only gate + Play Account ID + IP anti-abuse) and
+returns `{ referral: { applied: true|false, ... } }` in the login response. It
+never blocks login — a failed apply is returned as info, not an error.
 
 ---
 
@@ -88,3 +93,24 @@ Console internal track").
 ## 5. Enterprise / future — nothing needed yet
 
 Nothing else. Keep this file updated as new app-side data requirements appear.
+
+---
+
+## 6. Bonus-expiry inbox (Phase 2, built) — app-side TODO (optional)
+
+The bonus-expiry reminder (wallet.md §5.4) is delivered as an **in-app inbox** —
+zero native-push setup. The backend writes a `notifications` row when a bonus
+vintage is within 7 days of expiry; the app **polls at launch** (and can poll on
+foreground) instead of registering FCM tokens. This is the plan-sanctioned
+alternative to §3's push route and works with no app change at all.
+
+| Endpoint | Shape | Notes |
+|---|---|---|
+| `GET /me/notifications?unreadOnly=true&limit=&offset=` | 🔐 auth | Newest-first inbox. `rows: [{ id, userId, type, title, body, refId, data, status:'unread'\|'read', createdAt, updatedAt }]`, `total` |
+| `POST /me/notifications/read` | 🔐 auth, `{ ids: string[] }` | Mark mine as read. Only the caller's own rows are touched. Returns `{ updated }` |
+
+The daily sweep (`npm run wallet:expire`) fills the inboxes. **App-side:** call
+`GET /me/notifications?unreadOnly=true` at launch; show unread count as a badge
+and the list in a notifications screen; call `POST /me/notifications/read` when
+the user opens one. Nothing blocks if the app ignores it — inboxes just build up
+until the vintages expire.
