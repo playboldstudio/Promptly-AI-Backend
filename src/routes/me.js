@@ -4,6 +4,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { isAdminEmail } from '../config/env.js';
 import { getProfile, getMyPrompts, getSavedPrompts, getPurchasedPrompts, getTransactions, setUpiId, setBankDetails, clearBankDetails, deleteAccount, updateProfile } from '../services/me.service.js';
 import { getEarningsSummary, getEarningsByPrompt } from '../services/earnings.service.js';
+import { listNotifications, markNotificationsRead } from '../services/notifications.service.js';
 import { uploadImage } from '../services/storage.service.js';
 import { parsePaging } from '../utils/paging.js';
 import { httpError } from '../utils/http-error.js';
@@ -78,6 +79,39 @@ router.get('/saved', async (req, res, next) => {
 router.get('/transactions', async (req, res, next) => {
   try {
     const result = await getTransactions(req.userId, paging(req));
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+const notificationsReadSchema = z.object({
+  ids: z.array(z.string().min(1)).max(500),
+});
+
+/**
+ * GET /me/notifications — the signed-in user's inbox, newest first.
+ * ?unreadOnly=true&limit=&offset= filters to unread and pages.
+ */
+router.get('/notifications', async (req, res, next) => {
+  try {
+    const unreadOnly = req.query.unreadOnly === 'true' || req.query.unreadOnly === '1';
+    const result = await listNotifications(req.userId, { ...paging(req), unreadOnly });
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * POST /me/notifications/read — mark notification(s) as read.
+ * Body: { ids: string[] } — only the caller's own rows are touched.
+ */
+router.post('/notifications/read', async (req, res, next) => {
+  try {
+    const parsed = notificationsReadSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return next(httpError(400, 'Invalid body — expected { ids: string[] }'));
+    const result = await markNotificationsRead(req.userId, parsed.data.ids);
     return res.json(result);
   } catch (err) {
     return next(err);
