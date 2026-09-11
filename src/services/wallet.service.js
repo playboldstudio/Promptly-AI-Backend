@@ -1,6 +1,8 @@
 import {
   COLS,
   findByPk,
+  create,
+  upsert,
   inTxGet,
   inTxSet,
   inTxAdd,
@@ -168,12 +170,22 @@ export async function creditBalance(userId, balanceType, amountInr, meta = {}) {
  */
 export async function calculatePaymentSplit(userId, itemPriceInr) {
   const wallet = await getWallet(userId);
+  return calculateSplitFromBalances(wallet.balances, itemPriceInr);
+}
+
+/**
+ * Pure split math for a wallet balances map + item price. The map is the shape
+ * `getWallet().balances` returns: `{ earnings: { amountInr }, deposits: {...},
+ * bonus: {...} }`. Split by priority (deposits → earnings → bonus), each capped
+ * at `maxUsePercent` of the item. Exported for unit tests — no Firestore.
+ */
+export function calculateSplitFromBalances(balances, itemPriceInr) {
   const remaining = { value: toMoney(itemPriceInr) };
   const split = [];
 
   for (const typeCfg of getBalanceTypesByPriority()) {
     if (remaining.value <= 0) break;
-    const bal = wallet.balances[typeCfg.id]?.amountInr ?? 0;
+    const bal = toMoney(balances?.[typeCfg.id]?.amountInr ?? 0);
     if (bal <= 0) continue;
 
     const maxFromType = toMoney(itemPriceInr * (typeCfg.maxUsePercent / 100));
@@ -553,4 +565,115 @@ export async function adjustWallet({ userId, balanceType, deltaInr, note }) {
 
   const wallet = await getWallet(userId);
   return { success: true, action: op, balanceType, amountInr: amount, wallet: wallet.balances };
+}
+
+/* ── Wallet spend (payment source) ─────────────────────────────────────────── */
+
+/**
+ * Spend wallet balances as a payment source toward an item, in the documented
+ * priority (deposits → earnings → bonus, bonus capped at 10% of the item price).
+ * This is the "actual spend" counterpart to the read-only `GET /wallet/allocate`
+ * preview (plans/wallet.md §4.3–4.4, reference.md).
+ *
+ * Partial-coverage semantics: the split covers exactly what the wallet can, and
+ * `remaining` is the residual the caller pays via a real Play Billing purchase.
+ *
+ * Idempotent by `refId`:
+ *   1. Pre-check the ledger for a prior `wallet_spend:${refId}` row → no-op.
+ *   2. Race-close with a deterministic claim doc in `wallet_spends`
+ *      (`create()` throws if another concurrent caller already claimed it).
+ *   3. Debit via `debitBalances` (single tx, FEFO bonus).
+ * A concurrent retry loses the claim (`already exists`) and reports `reused`.
+ *
+ * Returns `{ success, split, totalCovered, remaining, wallet }` or
+ * `{ error: { status, message } }`.
+ */
+export async function spendFromWallet({ userId, itemPriceInr, refId, note }) {
+  if (!Number.isFinite(Number(itemPriceInr)) || Number(itemPriceInr) <= 0) {
+    return { error: { status: 400, message: 'itemPriceInr must be a positive number' } };
+  }
+  if (!refId || !String(refId).trim()) {
+    return { error: { status: 400, message: 'refId is required for idempotency' } };
+  }
+  if (!userId) return { error: { status: 401, message: 'Not authenticated' } };
+
+  const claimId = `${userId}_${String(refId)}`;
+  const ledgerRefId = `wallet_spend:${String(refId)}`;
+
+  // 1. Pre-check — a prior spend against this refId is a no-op.
+  const prior = await queryAll({
+    collection: COLS.transactions,
+    filters: [
+      { field: 'userId', value: userId },
+      { field: 'refId', value: ledgerRefId },
+    ],
+    limit: 1,
+  });
+  if (prior.rows.length > 0) {
+    return {
+      success: true,
+      reused: true,
+      totalCovered: toMoney(prior.rows[0].amountInr ?? 0),
+      remaining: 0,
+      wallet: (await getWallet(userId)).balances,
+    };
+  }
+
+  const split = await calculatePaymentSplit(userId, itemPriceInr);
+  if (split.split.length === 0 || split.totalCovered <= 0) {
+    return {
+      success: true,
+      totalCovered: 0,
+      remaining: toMoney(itemPriceInr),
+      wallet: (await getWallet(userId)).balances,
+      note: 'No wallet funds to spend',
+    };
+  }
+
+  // 2. Race-close: one caller claims this refId. `create()` throws if it exists.
+  try {
+    await create(COLS.walletSpends, claimId, {
+      userId,
+      refId,
+      itemPriceInr: toMoney(itemPriceInr),
+      totalCoveredInr: toMoney(split.totalCovered),
+      status: 'claimed',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  } catch (err) {
+    if (/already exists|ABORTED/i.test(err.message)) {
+      return { success: true, reused: true, totalCovered: split.totalCovered, remaining: split.remaining, wallet: (await getWallet(userId)).balances };
+    }
+    throw err;
+  }
+
+  // 3. Debit the split in one transaction.
+  const results = await debitBalances(
+    userId,
+    split.split.map((s) => ({
+      balanceType: s.balanceType,
+      amountInr: s.amountToUse,
+      meta: {
+        type: 'wallet_spend',
+        refId: ledgerRefId,
+        note: note ?? `Wallet spend on ${String(refId)}`,
+      },
+    })),
+  );
+
+  // Mark the claim spent (best-effort — the ledger rows are the source of truth).
+  try {
+    await upsert(COLS.walletSpends, claimId, { status: 'completed', completedAt: new Date(), updatedAt: new Date() });
+  } catch {
+    /* non-fatal */
+  }
+
+  return {
+    success: true,
+    split: results,
+    totalCovered: toMoney(split.totalCovered),
+    remaining: split.remaining,
+    wallet: (await getWallet(userId)).balances,
+  };
 }

@@ -15,7 +15,7 @@ import { voidOneTimePurchase, voidSubscriptionPurchase } from '../services/payme
 import { activateSubscriptionFromToken, cancelActiveSubscription } from '../services/payments/subscriptions.service.js';
 import { isDepositProduct, isAdFreeProduct } from '../services/payments/products.js';
 import { PRODUCT_TO_PLAN } from '../services/payments/plans.js';
-import { getWallet, adjustWallet, calculatePaymentSplit } from '../services/wallet.service.js';
+import { getWallet, adjustWallet, calculatePaymentSplit, spendFromWallet } from '../services/wallet.service.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { parsePaging } from '../utils/paging.js';
 import { httpError } from '../utils/http-error.js';
@@ -176,6 +176,33 @@ router.get('/wallet/allocate', async (req, res, next) => {
       return next(httpError(400, 'itemPriceInr must be a positive number'));
     }
     const result = await calculatePaymentSplit(req.userId, itemPriceInr);
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+const walletSpendSchema = z.object({
+  itemPriceInr: z.number().positive().finite(),
+  refId: z.string().trim().min(1).max(300),
+  note: z.string().trim().max(300).optional(),
+});
+
+/**
+ * POST /payments/wallet/spend — spend wallet balances as a payment source toward
+ * an item. Partial-coverage: debits exactly the wallet split (deposits →
+ * earnings → bonus, bonus capped at 10% of itemPriceInr) and returns `remaining`
+ * as the residual the caller pays via a real Play Billing purchase. Idempotent
+ * by `refId` — a replay returns the same result without double-debiting.
+ */
+router.post('/wallet/spend', moneyLimiter, requireAuth, async (req, res, next) => {
+  try {
+    const parsed = walletSpendSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return next(httpError(400, 'Invalid request body — expected itemPriceInr, refId, and optional note'));
+    }
+    const result = await spendFromWallet({ userId: req.userId, ...parsed.data });
+    if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json(result);
   } catch (err) {
     return next(err);

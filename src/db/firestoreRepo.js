@@ -25,6 +25,7 @@ const COLLECTIONS = Object.freeze({
   userPosts: 'user_posts',
   userBalances: 'user_balances',
   userWallets: 'user_wallets',
+  walletSpends: 'wallet_spends',
   bankAccounts: 'bank_accounts',
   kycVerifications: 'kyc_verifications',
   referralCodes: 'referral_codes',
