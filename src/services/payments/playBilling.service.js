@@ -4,6 +4,7 @@ import { verifyOneTimePurchase, acknowledgePurchase, calculatePlayBillingFee } f
 import { writeLedger } from '../ledger.js';
 import { isAdminEmail } from '../../config/env.js';
 import { getOneTimeProduct } from './products.js';
+import { playConsoleProductId } from './playConsoleIds.js';
 import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 import { creditDepositTopUpTx } from '../wallet.service.js';
 
@@ -197,8 +198,10 @@ export async function grantAdFree({ userId, purchaseToken }) {
     return err(409, 'You already have ad-free access');
   }
 
-  // Verify the purchase token with Google BEFORE granting.
-  const purchase = await verifyOneTimePurchase({ productId: 'ad_free', purchaseToken });
+  // Verify the purchase token with Google BEFORE granting. The Google API uses
+  // the real Play Console id for the ad-free SKU; internal storage uses `ad_free`.
+  const consoleId = playConsoleProductId('ad_free');
+  const purchase = await verifyOneTimePurchase({ productId: consoleId, purchaseToken });
   if (!purchase || Number(purchase.purchaseState) !== 0) {
     return err(400, 'Purchase not completed');
   }
@@ -239,7 +242,7 @@ export async function grantAdFree({ userId, purchaseToken }) {
     });
 
     // Acknowledge AFTER successful grant — prevents Google's 3-day auto-refund.
-    await acknowledgePurchase({ productId: 'ad_free', purchaseToken }).catch(() => {});
+    await acknowledgePurchase({ productId: consoleId, purchaseToken }).catch(() => {});
 
     return { success: true, adFree: true, priceInr: 149 };
   } catch (e) {
@@ -266,8 +269,11 @@ export async function handleDepositTopUp({ userId, productId, purchaseToken }) {
     return err(400, 'Not a deposit product');
   }
 
+  // Google API uses the real Play Console id; internal dispatch uses `deposit_*`.
+  const consoleId = playConsoleProductId(productId);
+
   // Verify the purchase token with Google BEFORE crediting.
-  const purchase = await verifyOneTimePurchase({ productId, purchaseToken });
+  const purchase = await verifyOneTimePurchase({ productId: consoleId, purchaseToken });
   if (!purchase || Number(purchase.purchaseState) !== 0) {
     return err(400, 'Purchase not completed');
   }
@@ -316,7 +322,7 @@ export async function handleDepositTopUp({ userId, productId, purchaseToken }) {
     });
 
     // Acknowledge AFTER successful grant — prevents Google's 3-day auto-refund.
-    await acknowledgePurchase({ productId, purchaseToken }).catch(() => {});
+    await acknowledgePurchase({ productId: consoleId, purchaseToken }).catch(() => {});
 
     return {
       success: true,

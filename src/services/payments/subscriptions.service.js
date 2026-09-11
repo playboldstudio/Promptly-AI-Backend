@@ -3,6 +3,7 @@ import { runTransaction } from '../../db/config.js';
 import { verifySubscription, acknowledgePurchase } from '../../lib/playBilling.js';
 import { writeLedger } from '../ledger.js';
 import { planById, PRODUCT_TO_PLAN } from './plans.js';
+import { playConsoleProductId } from './playConsoleIds.js';
 import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 
 function err(status, message) {
@@ -89,7 +90,7 @@ export async function activateSubscriptionFromToken({ userId, productId, purchas
     }
   });
 
-  await acknowledgePurchase({ productId: plan.id, purchaseToken, isSubscription: true }).catch(() => {});
+  await acknowledgePurchase({ productId: playConsoleProductId(plan.id), purchaseToken, isSubscription: true }).catch(() => {});
 
   return {
     success: true,

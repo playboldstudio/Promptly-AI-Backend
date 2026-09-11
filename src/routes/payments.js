@@ -15,6 +15,7 @@ import { voidOneTimePurchase, voidSubscriptionPurchase } from '../services/payme
 import { activateSubscriptionFromToken, cancelActiveSubscription } from '../services/payments/subscriptions.service.js';
 import { isDepositProduct, isAdFreeProduct } from '../services/payments/products.js';
 import { PRODUCT_TO_PLAN } from '../services/payments/plans.js';
+import { internalProductId, playConsoleProductId } from '../services/payments/playConsoleIds.js';
 import { getWallet, adjustWallet, calculatePaymentSplit, spendFromWallet } from '../services/wallet.service.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { parsePaging } from '../utils/paging.js';
@@ -65,7 +66,9 @@ router.post('/playbilling/verify', moneyLimiter, async (req, res, next) => {
   try {
     const parsed = playBillingVerifySchema.safeParse(req.body ?? {});
     if (!parsed.success) return next(httpError(400, 'Missing purchase details'));
-    const { productId, purchaseToken, isSubscription } = parsed.data;
+    const { purchaseToken, isSubscription } = parsed.data;
+    // Map the real Play Console productId to the internal id used for dispatch.
+    const productId = internalProductId(parsed.data.productId);
 
     // Subscription activation (monthly or annual).
     if (isSubscription === true || isSubscription === 'true' || PRODUCT_TO_PLAN[productId]) {
