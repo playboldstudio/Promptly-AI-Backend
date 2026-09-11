@@ -122,6 +122,7 @@ per-content, not static.)
 **RTDN Pub/Sub** (optional, for real-time revocations) → push to
 `POST /webhooks/google/rtdn`, subscription id in `RTDN_SUBSCRIPTION`. Not
 required to start — revocations can also be handled via `POST /payments/playbilling/void`.
+(Handling on **dev is deferred** — user will set it up when working on live.)
 
 ### 4b. Play Billing endpoints — request/response (the app calls these)
 
