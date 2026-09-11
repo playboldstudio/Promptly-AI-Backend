@@ -4,6 +4,7 @@ import { firebaseAuth } from '../db/firestore.js';
 import { COLS, findByPk, queryAll, upsert } from '../db/firestoreRepo.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { httpError } from '../utils/http-error.js';
+import { resolveAvatarOnLogin } from '../utils/profile-login.js';
 import {
   applyReferralCode,
   isOAuthSignIn,
@@ -35,7 +36,7 @@ router.post('/auth/login', loginLimiter, async (req, res, next) => {
       email: decoded.email ?? existing?.email ?? '',
       fullName:
         decoded.name ?? decoded.displayName ?? existing?.fullName ?? decoded.email?.split('@')[0] ?? 'User',
-      avatarUrl: decoded.picture ?? decoded.photoURL ?? existing?.avatarUrl ?? null,
+      avatarUrl: resolveAvatarOnLogin(existing?.avatarUrl, decoded.picture, decoded.photoURL),
       signInProvider,
       updatedAt: new Date(),
     };
