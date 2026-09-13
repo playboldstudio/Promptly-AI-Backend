@@ -292,6 +292,12 @@ export async function handleDepositTopUp({ userId, productId, purchaseToken }) {
         throw Object.assign(new Error('already-processed'), { alreadyProcessed: true });
       }
 
+      // NOTE: Firestore transactions require ALL reads BEFORE any write in the
+      // transaction. `creditDepositTopUpTx` must not read the user's wallet
+      // after the write below — so pre-read the wallet first, then record the
+      // purchase row, then credit the wallet with the pre-read doc.
+      const walletDoc = await inTxGet(tx, COLS.userWallets, userId); // read BEFORE writes
+
       // Record the purchase row.
       inTxSet(tx, COLS.promptPurchases, purchaseRowId, {
         buyerId: userId,
@@ -318,6 +324,7 @@ export async function handleDepositTopUp({ userId, productId, purchaseToken }) {
         gatewayFeeInr,
         refId: purchaseRowId,
         note: `Top-up ${product.name} — net ${netDeposit} after ${gatewayFeeInr} gateway fee`,
+        walletDoc, // pre-read wallet — no read-after-write
       });
     });
 

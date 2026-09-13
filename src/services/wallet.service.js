@@ -313,12 +313,15 @@ export async function debitBalances(userId, entries) {
  * Exported so callers (e.g. the deposit verify handler) can run this inside
  * their own idempotency transaction alongside the purchase-row write.
  */
-export function creditDepositTopUpTx(tx, { userId, priceInr, gatewayFeeInr, refId, note }) {
+export function creditDepositTopUpTx(tx, { userId, priceInr, gatewayFeeInr, refId, note, walletDoc = null }) {
   const netDeposit = toMoney(priceInr - gatewayFeeInr);
   const bonusCredit = toMoney(gatewayFeeInr);
 
-  return inTxGet(tx, COLS.userWallets, userId).then((walletDoc) => {
-    const wallet = walletDoc ?? zeroBalances();
+  // `walletDoc` is the caller's pre-read wallet (so we never do a read-after-write
+  // inside the transaction). When absent we accept it — the caller is responsible
+  // for having read the wallet BEFORE any writes in the same transaction.
+  const wallet = walletDoc ?? zeroBalances();
+  return Promise.resolve().then(() => {
 
     // 1) deposits += net.
     const newDeposits = toMoney(bucketAmount(wallet, 'deposits') + netDeposit);
