@@ -1,6 +1,6 @@
 import { COLS, findByPk, inTxGet, inTxSet } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
-import { verifyOneTimePurchase, acknowledgePurchase, calculatePlayBillingFee } from '../../lib/playBilling.js';
+import { verifyOneTimePurchase, acknowledgePurchase, calculatePlayBillingFee, safeVerify } from '../../lib/playBilling.js';
 import { writeLedger } from '../ledger.js';
 import { isAdminEmail } from '../../config/env.js';
 import { getOneTimeProduct } from './products.js';
@@ -60,7 +60,10 @@ export async function grantPromptUnlock({ buyerId, productId, purchaseToken }) {
   }
 
   // Verify the purchase token with Google BEFORE granting (never trust the client).
-  const purchase = await verifyOneTimePurchase({ productId, purchaseToken });
+  const { data: purchase, error: verifyErr } = await safeVerify(() =>
+    verifyOneTimePurchase({ productId, purchaseToken }),
+  );
+  if (verifyErr) return err(verifyErr.status, verifyErr.message);
   if (!purchase || Number(purchase.purchaseState) !== 0) {
     return err(400, 'Purchase not completed');
   }
@@ -201,7 +204,10 @@ export async function grantAdFree({ userId, purchaseToken }) {
   // Verify the purchase token with Google BEFORE granting. The Google API uses
   // the real Play Console id for the ad-free SKU; internal storage uses `ad_free`.
   const consoleId = playConsoleProductId('ad_free');
-  const purchase = await verifyOneTimePurchase({ productId: consoleId, purchaseToken });
+  const { data: purchase, error: verifyErr } = await safeVerify(() =>
+    verifyOneTimePurchase({ productId: consoleId, purchaseToken }),
+  );
+  if (verifyErr) return err(verifyErr.status, verifyErr.message);
   if (!purchase || Number(purchase.purchaseState) !== 0) {
     return err(400, 'Purchase not completed');
   }
@@ -273,7 +279,10 @@ export async function handleDepositTopUp({ userId, productId, purchaseToken }) {
   const consoleId = playConsoleProductId(productId);
 
   // Verify the purchase token with Google BEFORE crediting.
-  const purchase = await verifyOneTimePurchase({ productId: consoleId, purchaseToken });
+  const { data: purchase, error: verifyErr } = await safeVerify(() =>
+    verifyOneTimePurchase({ productId: consoleId, purchaseToken }),
+  );
+  if (verifyErr) return err(verifyErr.status, verifyErr.message);
   if (!purchase || Number(purchase.purchaseState) !== 0) {
     return err(400, 'Purchase not completed');
   }

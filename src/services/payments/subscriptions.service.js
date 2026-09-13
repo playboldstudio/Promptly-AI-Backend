@@ -1,6 +1,6 @@
 import { COLS, findByPk, queryAll, inTxGet, inTxSet, update } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
-import { verifySubscription, acknowledgePurchase } from '../../lib/playBilling.js';
+import { verifySubscription, acknowledgePurchase, safeVerify } from '../../lib/playBilling.js';
 import { writeLedger } from '../ledger.js';
 import { planById, PRODUCT_TO_PLAN } from './plans.js';
 import { playConsoleProductId } from './playConsoleIds.js';
@@ -26,7 +26,8 @@ export async function activateSubscriptionFromToken({ userId, productId, purchas
     return err(400, 'Unknown subscription plan');
   }
 
-  const purchase = await verifySubscription({ purchaseToken });
+  const { data: purchase, error: verifyErr } = await safeVerify(() => verifySubscription({ purchaseToken }));
+  if (verifyErr) return err(verifyErr.status, verifyErr.message);
   // purchaseState 0 = PURCHASED / active.
   if (!purchase || Number(purchase.purchaseState) !== 0) {
     return err(400, 'Subscription is not active');

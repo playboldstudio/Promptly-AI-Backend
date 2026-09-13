@@ -45,6 +45,32 @@ export async function verifySubscription({ purchaseToken }) {
   return data; // expiryTimeMillis, autoRenewing, cancelReason, ...
 }
 
+/**
+ * Wrap a Google Play Billing verify call so API errors (bad token, missing
+ * product, permission denied) return a clean {data:null, error:{status:400,message}}
+ * instead of throwing a raw 500. Genuine server errors (network, auth) still throw.
+ *
+ * @param {() => Promise<T>} verifyFn
+ * @returns {Promise<{data:T}|{data:null,error:{status:number,message:string}}>}
+ */
+export async function safeVerify(verifyFn) {
+  try {
+    const data = await verifyFn();
+    return { data };
+  } catch (e) {
+    // Google API errors carry a `code` or `status` (HTTP number) on the error object
+    // and a `errors[]` array; non-Google errors (network, Firebase) lack these.
+    const code = e.code ?? e.status;
+    if (code === 400 || code === 404 || code === 403) {
+      return {
+        data: null,
+        error: { status: 400, message: 'Purchase not verified — the token may be invalid or expired. Please try again.' },
+      };
+    }
+    throw e; // genuine server errors propagate to the global handler → 500
+  }
+}
+
 /** Acknowledge a purchase — required within 3 days or Google auto-refunds. */
 export async function acknowledgePurchase({ productId, purchaseToken, isSubscription = false }) {
   if (isSubscription) {
