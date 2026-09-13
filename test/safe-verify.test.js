@@ -17,6 +17,15 @@ test('safeVerify: maps 400/404/403 Google errors to a clean error object (no thr
   assert.match(result.error.message, /not verified/i);
 });
 
+test('safeVerify: maps Google string-code errors (missing required parameters) to 400', async () => {
+  const apiErr = new Error('Missing required parameters: subscriptionId');
+  apiErr.code = 'Missing required parameters: subscriptionId';
+  const result = await safeVerify(() => Promise.reject(apiErr));
+  assert.equal(result.data, null);
+  assert.equal(result.error.status, 400);
+  assert.match(result.error.message, /not verified/i);
+});
+
 test('safeVerify: rethrows genuine server errors (network, auth) for the global handler', async () => {
   const netErr = new Error('ECONNRESET');
   netErr.code = 'ECONNRESET';

@@ -36,10 +36,17 @@ export async function verifyOneTimePurchase({ productId, purchaseToken }) {
   return data; // purchaseState, consumptionState, token, purchaseTimeMillis, ...
 }
 
-/** Verify a subscription purchase token. */
-export async function verifySubscription({ purchaseToken }) {
+/**
+ * Verify a subscription purchase token.
+ *
+ * `subscriptionId` is the Play Console subscription SKU (e.g. `playbold-promptly-pro-monthly`)
+ * — the androidpublisher `purchases.subscriptions.get` API requires it alongside
+ * the purchase token. Callers pass the real console id (playConsoleProductId).
+ */
+export async function verifySubscription({ subscriptionId, purchaseToken }) {
   const { data } = await getClient().purchases.subscriptions.get({
     packageName: env.PLAY_BILLING_PACKAGE_NAME,
+    subscriptionId,
     token: purchaseToken,
   });
   return data; // expiryTimeMillis, autoRenewing, cancelReason, ...
@@ -58,16 +65,20 @@ export async function safeVerify(verifyFn) {
     const data = await verifyFn();
     return { data };
   } catch (e) {
-    // Google API errors carry a `code` or `status` (HTTP number) on the error object
-    // and a `errors[]` array; non-Google errors (network, Firebase) lack these.
+    // Google API errors carry a numeric `code`/`status` (HTTP) OR a string code
+    // like "Missing required parameters: subscriptionId"; both mean the purchase
+    // can't be verified as-is and are the client's problem, not a server outage.
     const code = e.code ?? e.status;
-    if (code === 400 || code === 404 || code === 403) {
+    const isClientError =
+      code === 400 || code === 403 || code === 404 ||
+      (typeof code === 'string' && /missing|required|invalid|not ?found|forbidden|expired/i.test(code));
+    if (isClientError) {
       return {
         data: null,
         error: { status: 400, message: 'Purchase not verified — the token may be invalid or expired. Please try again.' },
       };
     }
-    throw e; // genuine server errors propagate to the global handler → 500
+    throw e; // genuine server errors (network, auth outage) propagate → 500
   }
 }
 

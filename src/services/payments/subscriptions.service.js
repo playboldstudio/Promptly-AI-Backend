@@ -26,7 +26,9 @@ export async function activateSubscriptionFromToken({ userId, productId, purchas
     return err(400, 'Unknown subscription plan');
   }
 
-  const { data: purchase, error: verifyErr } = await safeVerify(() => verifySubscription({ purchaseToken }));
+  const { data: purchase, error: verifyErr } = await safeVerify(() =>
+    verifySubscription({ subscriptionId: playConsoleProductId(productId), purchaseToken }),
+  );
   if (verifyErr) return err(verifyErr.status, verifyErr.message);
   // purchaseState 0 = PURCHASED / active.
   if (!purchase || Number(purchase.purchaseState) !== 0) {
@@ -155,7 +157,10 @@ export async function handleRTDNSubscription({ purchaseToken, eventType }) {
   if (!existing) return; // unknown token — ignore
 
   if (eventType === 'SUBSCRIPTION_RENEWED' || eventType === 'SUBSCRIPTION_RESTARTED') {
-    const details = await verifySubscription({ purchaseToken }).catch(() => null);
+    const details = await verifySubscription({
+      subscriptionId: existing.planId ? playConsoleProductId(existing.planId) : undefined,
+      purchaseToken,
+    }).catch(() => null);
     await update(COLS.userSubscriptions, docId, {
       status: 'active',
       currentPeriodEnd: details
