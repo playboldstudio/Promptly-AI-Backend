@@ -2,7 +2,7 @@ import { Router, raw } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
 import { isAdminEmail } from '../config/env.js';
-import { getProfile, getMyPrompts, getSavedPrompts, getPurchasedPrompts, getTransactions, setUpiId, setBankDetails, clearBankDetails, deleteAccount, updateProfile } from '../services/me.service.js';
+import { getProfile, getMyPrompts, getSavedPrompts, getPurchasedPrompts, getTopUpHistory, getTransactions, setUpiId, setBankDetails, clearBankDetails, deleteAccount, updateProfile } from '../services/me.service.js';
 import { getEarningsSummary, getEarningsByPrompt } from '../services/earnings.service.js';
 import { listNotifications, markNotificationsRead } from '../services/notifications.service.js';
 import { uploadImage } from '../services/storage.service.js';
@@ -121,6 +121,19 @@ router.post('/notifications/read', async (req, res, next) => {
 router.get('/purchases', async (req, res, next) => {
   try {
     const result = await getPurchasedPrompts(req.userId, paging(req));
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * GET /me/topups — the signed-in user's deposit top-up history
+ * (productId, price, net after gateway fee, bonus credit, when).
+ */
+router.get('/topups', async (req, res, next) => {
+  try {
+    const result = await getTopUpHistory(req.userId, paging(req));
     return res.json(result);
   } catch (err) {
     return next(err);

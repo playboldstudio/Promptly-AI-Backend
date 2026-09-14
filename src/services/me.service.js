@@ -97,33 +97,74 @@ export async function getSavedPrompts(userId, { limit = 50, offset = 0 } = {}) {
 }
 
 export async function getPurchasedPrompts(userId, { limit = 50, offset = 0 } = {}) {
-  const [page, total] = await Promise.all([
-    queryAll({
-      collection: COLS.promptPurchases,
-      filters: [{ field: 'buyerId', value: userId }, { field: 'status', value: 'completed' }],
-      orderBy: { field: 'createdAt', direction: 'desc' },
-      limit,
-      offset,
-    }),
-    countDocuments(COLS.promptPurchases, [{ field: 'buyerId', value: userId }, { field: 'status', value: 'completed' }]),
-  ]);
+  const page = await queryAll({
+    collection: COLS.promptPurchases,
+    filters: [{ field: 'buyerId', value: userId }, { field: 'status', value: 'completed' }],
+    orderBy: { field: 'createdAt', direction: 'desc' },
+    limit,
+    offset,
+  });
   const rows = page.rows;
 
   const promptIds = rows.map((r) => r.promptId).filter(Boolean);
   const prompts = promptIds.length ? await getMany(COLS.prompts, promptIds) : {};
 
-  const purchases = rows.map((row) => {
-    const prompt = prompts[row.promptId];
-    return {
-      purchaseId: row.id,
-      purchasedAt: row.createdAt,
-      priceInr: Number(row.priceInr) || 0,
-      // The buyer owns the prompt — always return the full unlocked body.
-      prompt: prompt ? { ...prompt, unlocked: true, savedByMe: false } : null,
-    };
+  // Only *real* prompt unlocks belong here. The prompt_purchases collection also
+  // holds deposit top-ups (promptId = 'deposit_s'…) and ad-free (promptId =
+  // 'ad_free') rows — those aren't prompts, so drop any row whose promptId isn't
+  // an existing prompts doc (or where authorId is null — no creator to credit).
+  const purchases = rows
+    .filter((row) => prompts[row.promptId] || row.authorId)
+    .map((row) => {
+      const prompt = prompts[row.promptId];
+      return {
+        purchaseId: row.id,
+        purchasedAt: row.createdAt,
+        priceInr: Number(row.priceInr) || 0,
+        // The buyer owns the prompt — always return the full unlocked body.
+        prompt: prompt ? { ...prompt, unlocked: true, savedByMe: false } : null,
+      };
+    });
+
+  // `total` reflects the filtered prompt-purchase rows actually returned; the
+  // raw prompt_purchases count includes unrelated top-up/ad-free rows, so it
+  // would overstate the app's "purchased prompts" count.
+  return { purchases, total: purchases.length };
+}
+
+/**
+ * The user's deposit top-up history (one per deposit pack purchased).
+ * Same prompt_purchases collection, but only the `deposit_*` rows.
+ */
+export async function getTopUpHistory(userId, { limit = 100, offset = 0 } = {}) {
+  const page = await queryAll({
+    collection: COLS.promptPurchases,
+    filters: [{ field: 'buyerId', value: userId }, { field: 'status', value: 'completed' }],
+    orderBy: { field: 'createdAt', direction: 'desc' },
+    limit,
+    offset,
   });
 
-  return { purchases, total: total ?? purchases.length };
+  // A deposit row has promptId = 'deposit_s/m/l/xl' and a null/absent authorId
+  // (no creator is credited on a top-up). Exclude prompt unlocks + ad-free.
+  const DEPOSITS = /^deposit_/;
+  const rows = page.rows.filter(
+    (r) => DEPOSITS.test(r.promptId ?? '') && (r.authorId == null),
+  );
+
+  return {
+    topups: rows.map((r) => ({
+      id: r.id,
+      productId: r.promptId,
+      priceInr: Number(r.priceInr) || 0,
+      gatewayFeeInr: Number(r.gatewayFeeInr) || 0,
+      netDepositInr: Number(r.priceInr) - (Number(r.gatewayFeeInr) || 0),
+      bonusCreditInr: Number(r.gatewayFeeInr) || 0, // fee recycled as bonus
+      status: r.status,
+      createdAt: r.createdAt,
+    })),
+    total: rows.length,
+  };
 }
 
 export async function getTransactions(userId, { limit = 50, offset = 0 } = {}) {
