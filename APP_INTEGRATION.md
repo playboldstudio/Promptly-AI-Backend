@@ -144,6 +144,21 @@ the callback token + product id from Play Billing; the backend verifies with
 Google (using `PLAY_BILLING_PACKAGE_NAME` + the real console id), grants the
 entitlement, and credits the wallet.
 
+### 4c. Purchase / top-up / wallet history — `GET /me/*` (the app's "history" screens)
+
+All require the Firebase ID token (Bearer). All under `{base}/me`.
+
+| Endpoint | Response | Notes |
+|---|---|---|
+| `GET /me/purchases?limit=&offset=` | `{ purchases: [{ purchaseId, purchasedAt, priceInr, prompt }], total }` | **Only real prompt unlocks** — deposit top-ups and ad-free purchases are excluded. `prompt` is the full prompt object unlocked for the owner. |
+| `GET /me/topups?limit=&offset=` | `{ topups: [{ id, productId, priceInr, gatewayFeeInr, netDepositInr, bonusCreditInr, status, createdAt }], total }` | Deposit history (one row per pack bought). `netDepositInr = price − gatewayFee`; `bonusCreditInr = gatewayFee` (recycled as bonus). |
+| `GET /me/transactions?limit=&offset=` | `{ transactions: [...], total }` | The full ledger — every credit/debit (deposit, referral bonus, wallet spend, prompt sale payout, void…). |
+| `GET /me/earnings` | `{ earnings }` | Creator side — totalEarnings, salesCount, withdrawn, balance. |
+
+Add both `/me/purchases` (my purchased prompts) and `/me/topups` (my deposit
+history) to the app's history/profile screens. `/me/transactions` is the
+catch-all ledger if you want one unified list.
+
 ---
 
 ## 5. Enterprise / future — nothing needed yet
