@@ -200,6 +200,12 @@ export async function applyReferralCode({ refereeId, code, playAccountId, ipAddr
         throw Object.assign(new Error('already-referred'), { alreadyReferred: true });
       }
 
+      // Read any existing wallets BEFORE any write (Firestore: all reads first).
+      // creditBonusInTx below uses these pre-read docs — it must never read after
+      // the writes (the referral/fingerprint rows) in this same transaction.
+      const referrerWallet = await inTxGet(tx, COLS.userWallets, codeDoc.userId);
+      const refereeWallet = await inTxGet(tx, COLS.userWallets, refereeId);
+
       // Referral row.
       inTxSet(tx, COLS.referrals, referralId, {
         referrerId: codeDoc.userId,
@@ -223,9 +229,10 @@ export async function applyReferralCode({ refereeId, code, playAccountId, ipAddr
         });
       }
 
-      // Both bonus credits inside the same transaction (vintage-aware).
-      creditBonusInTx(tx, codeDoc.userId, env.REFERRAL_BONUS_INR, 'referral_bonus', referralId);
-      creditBonusInTx(tx, refereeId, env.REFERRAL_WELCOME_BONUS_INR, 'welcome_bonus', referralId);
+      // Both bonus credits inside the same transaction (vintage-aware). Uses the
+      // pre-read wallet docs — never reads after the writes above.
+      creditBonusInTx(tx, codeDoc.userId, env.REFERRAL_BONUS_INR, 'referral_bonus', referralId, referrerWallet);
+      creditBonusInTx(tx, refereeId, env.REFERRAL_WELCOME_BONUS_INR, 'welcome_bonus', referralId, refereeWallet);
     });
   } catch (e) {
     if (e.alreadyReferred) return err(409, 'You were already referred by someone');
@@ -244,9 +251,13 @@ export async function applyReferralCode({ refereeId, code, playAccountId, ipAddr
  * Credit a bonus inside the caller's transaction — writes the wallet's bonus
  * scalar + a bonus vintage entry + a ledger row. Mirrors creditBalance's bonus
  * path so referral credits follow the same FEFO/expiry rule set.
+ *
+ * `walletDoc` is the caller's PRE-READ wallet (before any write in the same
+ * transaction) — Firestore forbids reading after a write, and the caller writes
+ * the referral / fingerprint rows before crediting. Never read internally here.
  */
-function creditBonusInTx(tx, userId, amountInr, type, refId) {
-  const wallet = inTxGet(tx, COLS.userWallets, userId) ?? zeroBalances();
+function creditBonusInTx(tx, userId, amountInr, type, refId, walletDoc) {
+  const wallet = walletDoc ?? zeroBalances();
   const vintages = { ...(wallet.bonusVintages ?? {}) };
   const prior = vintages[refId];
 
