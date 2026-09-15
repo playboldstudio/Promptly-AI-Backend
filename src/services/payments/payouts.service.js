@@ -4,6 +4,7 @@ import { env } from '../../config/env.js';
 import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 import { getWallet } from '../wallet.service.js';
 import { calculateWithdrawal } from './withdrawal-fees.js';
+import { notify } from '../notify.js';
 
 const MIN_WITHDRAWAL_INR = env.MIN_WITHDRAWAL_INR;
 
@@ -213,6 +214,17 @@ export async function requestPayout({ userId, amountInr }) {
     });
 
     const payout = await findByPk(COLS.payouts, payoutId);
+
+    notify({
+      userId,
+      type: 'payout',
+      title: 'Withdrawal requested',
+      body: `Your ₹${amountInr} withdrawal is being processed (≈₹${fees.netInr} to your bank).`,
+      refId: payoutId,
+      dedupeKey: `payout_${payoutId}`,
+      data: { amountInr, netInr: fees.netInr, status: 'pending' },
+    });
+
     return {
       payout: {
         id: payout.id,
@@ -327,6 +339,17 @@ export async function markPayoutPaid({ payoutId }) {
       });
     });
     const updated = await findByPk(COLS.payouts, payoutId);
+    if (updated?.userId) {
+      notify({
+        userId: updated.userId,
+        type: 'payout',
+        title: 'Withdrawal paid',
+        body: `Your withdrawal of ₹${updated.amountInr} has been paid to your bank.`,
+        refId: payoutId,
+        dedupeKey: `payout_paid_${payoutId}`,
+        data: { amountInr: updated.amountInr, status: 'paid' },
+      });
+    }
     return { payout: updated };
   } catch (error) {
     if (error.claimed) return err(409, 'Payout is no longer pending');
@@ -377,6 +400,17 @@ export async function markPayoutFailed({ payoutId, reason }) {
       });
     });
     const updated = await findByPk(COLS.payouts, payoutId);
+    if (updated?.userId) {
+      notify({
+        userId: updated.userId,
+        type: 'payout',
+        title: 'Withdrawal failed',
+        body: reason ? `Your withdrawal was not processed: ${reason}` : 'Your withdrawal could not be processed. The amount is back in your balance.',
+        refId: payoutId,
+        dedupeKey: `payout_failed_${payoutId}`,
+        data: { amountInr: updated.amountInr, status: 'failed', reason: reason ?? null },
+      });
+    }
     return { payout: updated };
   } catch (error) {
     if (error.claimed) return err(409, 'Payout is no longer pending');

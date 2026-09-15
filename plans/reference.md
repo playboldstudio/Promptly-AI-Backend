@@ -219,7 +219,7 @@ POST /payments/checkout/*  → removed (Razorpay checkout; Play Billing handles 
 
 ```bash
 # Play Billing
-PLAY_BILLING_PACKAGE_NAME=com.promptlyai.app
+PLAY_BILLING_PACKAGE_NAME=com.playboldstudio.promptlyai
 # Uses GOOGLE_APPLICATION_CREDENTIALS for auth
 
 # RTDN

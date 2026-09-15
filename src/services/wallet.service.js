@@ -17,6 +17,7 @@ import {
   zeroBalances,
 } from './payments/balance-types.js';
 import { currentActiveSubscriptionWithPlan } from './payments/subscription-utils.js';
+import { notify } from './notify.js';
 
 /**
  * Multi-balance wallet (Phase 2 — plans/wallet.md).
@@ -673,6 +674,16 @@ export async function spendFromWallet({ userId, itemPriceInr, refId, note }) {
     /* non-fatal */
   }
 
+  notify({
+    userId,
+    type: 'wallet_spend',
+    title: 'Wallet payment',
+    body: `Used ₹${toMoney(split.totalCovered)} from your wallet.`,
+    refId: ledgerRefId,
+    dedupeKey: `wallet_spend_${claimId}`,
+    data: { totalCovered: split.totalCovered, itemPriceInr, note: note ?? null },
+  });
+
   return {
     success: true,
     split: results,
@@ -847,6 +858,26 @@ export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refI
       return { error: { status: 402, message: `Insufficient wallet balance — add ₹${shortfall} to continue` }, shortfall };
     }
     throw err;
+  }
+
+  notify({
+    userId,
+    type: 'prompt_unlocked',
+    title: 'Prompt unlocked',
+    body: `You unlocked "${prompt.title}"`,
+    refId: purchaseId,
+    dedupeKey: purchaseId,
+  });
+  if (prompt.authorId) {
+    notify({
+      userId: prompt.authorId,
+      type: 'paid_prompt_sale',
+      title: 'Someone purchased your prompt',
+      body: `"${prompt.title}" was unlocked — +₹${priceInr} in earnings`,
+      refId: purchaseId,
+      dedupeKey: purchaseId,
+      data: { buyerId: userId, priceInr },
+    });
   }
 
   return {

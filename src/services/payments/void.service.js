@@ -1,7 +1,8 @@
-import { COLS, findByPk, inTxGet, inTxSet, inTxAdd } from '../../db/firestoreRepo.js';
+import { COLS, findByPk, queryAll, inTxGet, inTxSet, inTxAdd } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
 import { getOneTimeProduct, isDepositProduct } from './products.js';
 import { refundDepositTx } from '../wallet.service.js';
+import { notify } from '../notify.js';
 
 /**
  * Refund / void handling — Phase 1 ★ (plans/play-billing.md §7).
@@ -45,6 +46,25 @@ function toMoney(value) {
 async function findOneTimeGrant({ userId, productId }) {
   const docId = `${userId}_${productId}`;
   return findByPk(COLS.promptPurchases, docId);
+}
+
+/**
+ * Look up a purchase row by its gateway token (prompts, deposits, ad-free).
+ * Deposit rows are now per-purchase (token-suffixed ids), so lookups go through
+ * the stored token, never a re-derived pooled id.
+ */
+async function findGrantByToken(userId, purchaseToken, productId) {
+  if (!purchaseToken) return null;
+  const { rows } = await queryAll({
+    collection: COLS.promptPurchases,
+    filters: [
+      { field: 'buyerId', value: userId },
+      { field: 'gatewayOrderToken', value: purchaseToken },
+      ...(productId ? [{ field: 'promptId', value: productId }] : []),
+    ],
+    limit: 1,
+  });
+  return rows[0] ?? null;
 }
 
 /**
@@ -151,6 +171,26 @@ async function voidPromptPurchase({ userId, purchaseToken, productId, reason }) 
       });
     });
 
+    // Notify the author (money pulled back) + the buyer (refund).
+    if (authorId) {
+      notify({
+        userId: authorId,
+        type: 'purchase_void_author',
+        title: 'A purchase was refunded',
+        body: `Your sale of "${grant.promptId ?? productId}" (₹${salesPrice}) was refunded to the buyer`,
+        refId: `${userId}_${productId}`,
+        dedupeKey: `${userId}_${productId}_void_author`,
+      });
+    }
+    notify({
+      userId,
+      type: 'purchase_void',
+      title: 'Purchase refunded',
+      body: `Your purchase was refunded — ₹${buyerPays} returned`,
+      refId: `${userId}_${productId}`,
+      dedupeKey: `${userId}_${productId}_void`,
+    });
+
     return { success: true, type: 'prompt', promptId, voided: true, refundedInr: buyerPays };
   } catch (e) {
     if (e.alreadyVoided) return err(409, 'This prompt purchase is already voided');
@@ -172,25 +212,29 @@ async function voidDeposit({ userId, productId, purchaseToken, reason }) {
   if (!product || product.type !== 'consumable') {
     return err(400, 'Not a deposit product');
   }
-  const grant = await findOneTimeGrant({ userId, productId });
+
+  // New-format deposit rows are per-purchase (id = `{userId}_{productId}_<tokenSuffix>`),
+  // so resolve the grant BY TOKEN — never by the pooling `{userId}_{productId}` id
+  // (repeat top-ups no longer overwrite the same row).
+  const grant = await findGrantByToken(userId, purchaseToken, productId);
   if (!grant) return err(404, 'No deposit top-up found to void');
-  if (grant.gatewayOrderToken !== purchaseToken) {
-    return err(409, 'Purchase token mismatch — cannot void this top-up');
-  }
   if (grant.status === 'voided') {
     return err(409, 'This deposit top-up is already voided');
   }
 
   const netDeposit = Number(grant.priceInr) - (Number(grant.gatewayFeeInr) || 0);
-  const vintageId = `${userId}_${productId}`; // matches creditDepositTopUpTx's creditId
+  // Vintage id is the PER-PURCHASE row id (token-suffixed), matching
+  // creditDepositTopUpTx's refId. Never re-derive the pooled `{userId}_{productId}`
+  // — refunding one pack must not wipe a whole pooled bonus vintage.
+  const vintageId = grant.id;
 
   try {
     const refund = await runTransaction(async (tx) => {
-      const fresh = await inTxGet(tx, COLS.promptPurchases, `${userId}_${productId}`);
-      if (fresh?.status === 'voided') {
+      const fresh = await inTxGet(tx, COLS.promptPurchases, grant.id);
+      if (!fresh || fresh.status === 'voided') {
         throw Object.assign(new Error('already-voided'), { alreadyVoided: true });
       }
-      inTxSet(tx, COLS.promptPurchases, `${userId}_${productId}`, {
+      inTxSet(tx, COLS.promptPurchases, grant.id, {
         status: 'voided',
         voidedAt: new Date(),
         voidReason: reason ?? 'refund',
@@ -202,9 +246,19 @@ async function voidDeposit({ userId, productId, purchaseToken, reason }) {
         userId,
         netDeposit,
         vintageId,
-        refId: `${userId}_${productId}`,
+        refId: grant.id,
         note: `Refunded deposit ${product.name} — net ${netDeposit} removed`,
       });
+    });
+
+    notify({
+      userId,
+      type: 'deposit_refund',
+      title: 'Top-up refunded',
+      body: `₹${netDeposit} deposit refunded to your wallet`,
+      refId: grant.id,
+      dedupeKey: `${grant.id}_void`,
+      data: { productId, netDeposit },
     });
 
     return {
@@ -268,6 +322,15 @@ async function voidAdFree({ userId, purchaseToken, reason }) {
     }
   });
 
+  notify({
+    userId,
+    type: 'ad_free_void',
+    title: 'Ad-free removed',
+    body: perkActive ? 'Your ad-free perk stays via your subscription.' : 'Ad-free access was removed.',
+    refId: `${userId}_ad_free`,
+    dedupeKey: `${userId}_ad_free_void`,
+  });
+
   return {
     success: true,
     type: 'ad_free',
@@ -303,6 +366,17 @@ async function voidSubscription({ purchaseToken, reason }) {
       updatedAt: new Date(),
     });
   });
+
+  if (sub.userId) {
+    notify({
+      userId: sub.userId,
+      type: 'subscription_void',
+      title: 'Subscription voided',
+      body: 'Your subscription has been refunded and ends.',
+      refId: docId,
+      dedupeKey: `${docId}_void`,
+    });
+  }
 
   return { success: true, type: 'subscription', subscriptionId: docId, voided: true };
 }

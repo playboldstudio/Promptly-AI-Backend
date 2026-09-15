@@ -32,7 +32,7 @@ npm install googleapis   # androidpublisher v3
 
 ```bash
 # Google Play Billing — uses GOOGLE_APPLICATION_CREDENTIALS / FIREBASE_PRIVATE_KEY
-PLAY_BILLING_PACKAGE_NAME=com.promptlyai.app
+PLAY_BILLING_PACKAGE_NAME=com.playboldstudio.promptlyai
 
 # Pub/Sub RTDN
 GOOGLE_CLOUD_PROJECT=playbold-promptly-prod

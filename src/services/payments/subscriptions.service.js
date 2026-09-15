@@ -1,10 +1,11 @@
 import { COLS, findByPk, queryAll, inTxGet, inTxSet, update } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
-import { verifySubscription, acknowledgePurchase, safeVerify } from '../../lib/playBilling.js';
+import { verifySubscription, acknowledgePurchaseWithRetry, safeVerify } from '../../lib/playBilling.js';
 import { writeLedger } from '../ledger.js';
 import { planById, PRODUCT_TO_PLAN } from './plans.js';
 import { playConsoleProductId } from './playConsoleIds.js';
 import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
+import { notify } from '../notify.js';
 
 function err(status, message) {
   return { error: { status, message } };
@@ -93,7 +94,18 @@ export async function activateSubscriptionFromToken({ userId, productId, purchas
     }
   });
 
-  await acknowledgePurchase({ productId: playConsoleProductId(plan.id), purchaseToken, isSubscription: true }).catch(() => {});
+  await acknowledgePurchaseWithRetry({ productId: playConsoleProductId(plan.id), purchaseToken, isSubscription: true }).catch(() => {});
+
+  // Inbox notification for the buyer (deduped by the subscription doc id).
+  notify({
+    userId,
+    type: 'subscription_payment',
+    title: `${plan.name} is active`,
+    body: `Your ${plan.name} plan is active — ₹${plan.priceInr}/${billingLabel}`,
+    refId: docId,
+    dedupeKey: docId,
+    data: { planId: plan.id, priceInr: plan.priceInr, billingCycle: plan.billingCycle, currentPeriodEnd: periodEnd.toISOString() },
+  });
 
   return {
     success: true,
@@ -168,16 +180,40 @@ export async function handleRTDNSubscription({ purchaseToken, eventType }) {
         : new Date(Date.now() + MONTH_MS).toISOString(),
       updatedAt: new Date(),
     });
+    notify({
+      userId: existing.userId,
+      type: 'subscription_renewed',
+      title: 'Subscription renewed',
+      body: eventType === 'SUBSCRIPTION_RESTARTED' ? 'Your plan has restarted — welcome back!' : 'Your plan period has been renewed.',
+      refId: docId,
+      dedupeKey: `renew_${docId}`,
+    });
   } else if (eventType === 'SUBSCRIPTION_EXPIRED') {
     await update(COLS.userSubscriptions, docId, {
       status: 'expired',
       updatedAt: new Date(),
+    });
+    notify({
+      userId: existing.userId,
+      type: 'subscription_expired',
+      title: 'Subscription expired',
+      body: 'Your plan has ended.', // keep it neutral; details in the plans screen
+      refId: docId,
+      dedupeKey: `expired_${docId}_${Date.now()}`,
     });
   } else if (eventType === 'SUBSCRIPTION_CANCELED') {
     await update(COLS.userSubscriptions, docId, {
       status: 'cancelled',
       cancelledAt: new Date(),
       updatedAt: new Date(),
+    });
+    notify({
+      userId: existing.userId,
+      type: 'subscription_cancelled',
+      title: 'Subscription cancelled',
+      body: 'Your plan has been cancelled and won’t renew.',
+      refId: docId,
+      dedupeKey: `cancelled_${docId}`,
     });
   }
 }

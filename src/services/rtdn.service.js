@@ -1,5 +1,6 @@
-import { COLS, findByPk, update, upsert } from '../db/firestoreRepo.js';
+import { COLS, findByPk, update, upsert, queryAll } from '../db/firestoreRepo.js';
 import { handleRTDNSubscription } from './payments/subscriptions.service.js';
+import { notify } from './notify.js';
 
 /**
  * Google Play Real-Time Developer Notification handler.
@@ -45,9 +46,28 @@ export async function handleRTDNEvent(event, subscriptionName) {
   try {
     if (token && eventType) {
       await handleRTDNSubscription({ purchaseToken: token, eventType });
-    } else if (inappProductId && event?.inappProductId) {
-      // One-time purchase void/refund handled by the void endpoint; RTDN just
-      // logs it here.
+    } else if (inappProductId) {
+      // One-time purchase void/refund pushed by Google. Resolve the purchase
+      // row by its gateway token and notify the buyer (the confirm endpoint
+      // already reverses the wallet).
+      const voided = token
+        ? await queryAll({
+            collection: COLS.promptPurchases,
+            filters: [{ field: 'gatewayOrderToken', value: token }],
+            limit: 1,
+          })
+        : { rows: [] };
+      const purchase = voided.rows[0];
+      if (purchase?.buyerId) {
+        notify({
+          userId: purchase.buyerId,
+          type: 'deposit_refund',
+          title: 'Purchase refunded',
+          body: 'Your purchase was refunded by the Play Store.',
+          refId: purchase.id,
+          dedupeKey: `${purchase.id}_rtdn_void`,
+        });
+      }
     }
     await update(COLS.webhookEvents, dedupeKey, {
       processedAt: new Date(),

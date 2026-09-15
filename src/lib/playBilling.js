@@ -1,5 +1,5 @@
 import { google } from 'googleapis';
-import { env } from '../config/env.js';
+import { env, hasPlayBilling } from '../config/env.js';
 
 /**
  * Google Play Billing client + purchase helpers.
@@ -24,6 +24,26 @@ function getClient() {
     _androidpublisher = google.androidpublisher({ version: 'v3', auth });
   }
   return _androidpublisher;
+}
+
+/**
+ * True only when Play Billing is configured (package name set). Used by the
+ * verify routes to return a clear 503 instead of a raw Google 400 when the
+ * package name is unset (the audit's §1.1 — config problem, not a purchase bug).
+ */
+export function playBillingConfigured() {
+  return hasPlayBilling;
+}
+
+/** Consume a consumable one-time product (deposit packs). Required before a 2nd
+ *  purchase of the same SKU, else Google returns ITEM_ALREADY_OWNED. */
+export async function consumePurchase({ productId, purchaseToken }) {
+  const { data } = await getClient().purchases.products.consume({
+    packageName: env.PLAY_BILLING_PACKAGE_NAME,
+    productId,
+    token: purchaseToken,
+  });
+  return data;
 }
 
 /** Verify an in-app one-time product purchase (prompts, deposits, ad-free). */
@@ -98,6 +118,30 @@ export async function acknowledgePurchase({ productId, purchaseToken, isSubscrip
       requestBody: { developerPayload: '' },
     });
   }
+}
+
+/** Sleep helper for the acknowledge retry backoff. */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Acknowledge with a small retry/backoff — a silent ack failure lets Google
+ * auto-refund the buyer in 3 days even though we already granted the
+ * entitlement (money leak). If it still fails after retries the caller's
+ * catch handles it (logged; never blocks the purchase response).
+ */
+export async function acknowledgePurchaseWithRetry(opts, { attempts = 3 } = {}) {
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      await acknowledgePurchase(opts);
+      return true;
+    } catch (err) {
+      if (i === attempts) throw err;
+      await sleep(100 * 2 ** (i - 1));
+    }
+  }
+  return false;
 }
 
 /**********************************************************************

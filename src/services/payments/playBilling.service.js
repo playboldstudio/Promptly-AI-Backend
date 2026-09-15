@@ -1,12 +1,13 @@
 import { COLS, findByPk, inTxGet, inTxSet } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
-import { verifyOneTimePurchase, acknowledgePurchase, calculatePlayBillingFee, safeVerify } from '../../lib/playBilling.js';
+import { verifyOneTimePurchase, acknowledgePurchaseWithRetry, consumePurchase, calculatePlayBillingFee, safeVerify } from '../../lib/playBilling.js';
 import { writeLedger } from '../ledger.js';
 import { isAdminEmail } from '../../config/env.js';
 import { getOneTimeProduct } from './products.js';
 import { playConsoleProductId } from './playConsoleIds.js';
 import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 import { creditDepositTopUpTx } from '../wallet.service.js';
+import { notify } from '../notify.js';
 
 /** Money precision: rupees with paise — never more than 2 decimals. */
 function toMoney(value) {
@@ -19,6 +20,25 @@ function err(status, message) {
 
 function purchaseIdFor(buyerId, promptId) {
   return `${buyerId}_${promptId}`;
+}
+
+/**
+ * A short, deterministic suffix from a purchase token — used to make a deposit
+ * purchase row id unique per purchase (fix: repeat top-ups of the same pack no
+ * longer collide at `{userId}_{productId}` — see PAYMENT_API_AUDIT_REPORT §1.3).
+ */
+function tokenSuffix(token) {
+  if (!token) return Date.now().toString(36);
+  return Buffer.from(String(token)).toString('hex').slice(-12);
+}
+
+/**
+ * Per-purchase deposit row id. `{userId}_{productId}` alone overwrote the prior
+ * purchase on a repeat top-up (history lost + refunds blocked); the token suffix
+ * makes each purchase its own row while staying deterministic for idempotency.
+ */
+export function depositRowIdFor(userId, productId, purchaseToken) {
+  return `${userId}_${productId}_${tokenSuffix(purchaseToken)}`;
 }
 
 /**
@@ -160,8 +180,29 @@ export async function grantPromptUnlock({ buyerId, productId, purchaseToken }) {
       );
     });
 
-    // Acknowledge AFTER a successful grant — prevents Google's 3-day auto-refund.
-    await acknowledgePurchase({ productId, purchaseToken, isSubscription: false }).catch(() => {});
+    // Acknowledge AFTER a successful grant (retries, never silent-loss).
+    await acknowledgePurchaseWithRetry({ productId, purchaseToken, isSubscription: false }).catch(() => {});
+
+    // Inbox notifications (best-effort, never fails a completed purchase).
+    notify({
+      userId: buyerId,
+      type: 'prompt_unlocked',
+      title: 'Prompt unlocked',
+      body: `You unlocked "${prompt.title}"`,
+      refId: purchaseId,
+      dedupeKey: purchaseId,
+    });
+    if (prompt.authorId) {
+      notify({
+        userId: prompt.authorId,
+        type: 'paid_prompt_sale',
+        title: 'Someone purchased your prompt',
+        body: `"${prompt.title}" was unlocked — +₹${priceInr} in earnings`,
+        refId: purchaseId,
+        dedupeKey: purchaseId,
+        data: { buyerId, priceInr },
+      });
+    }
 
     return {
       success: true,
@@ -248,7 +289,16 @@ export async function grantAdFree({ userId, purchaseToken }) {
     });
 
     // Acknowledge AFTER successful grant — prevents Google's 3-day auto-refund.
-    await acknowledgePurchase({ productId: consoleId, purchaseToken }).catch(() => {});
+    await acknowledgePurchaseWithRetry({ productId: consoleId, purchaseToken }).catch(() => {});
+
+    notify({
+      userId,
+      type: 'ad_free',
+      title: 'Ad-free activated',
+      body: 'Ads are now removed — enjoy Promptly without interruptions.',
+      refId: `${userId}_ad_free`,
+      dedupeKey: `${userId}_ad_free`,
+    });
 
     return { success: true, adFree: true, priceInr: 149 };
   } catch (e) {
@@ -291,9 +341,23 @@ export async function handleDepositTopUp({ userId, productId, purchaseToken }) {
   const gateway = calculatePlayBillingFee({ salePriceInr: priceInr });
   const gatewayFeeInr = gateway.feeInr;
   const netDeposit = priceInr - gatewayFeeInr;
-  const purchaseRowId = `${userId}_${productId}`;
+  // Per-purchase row id (token-suffixed) — repeat top-ups of the same pack no
+  // longer overwrite the prior purchase (audit §1.3: history + refunds broke).
+  const purchaseRowId = depositRowIdFor(userId, productId, purchaseToken);
 
   try {
+    // Consumables MUST be consumed after purchase, or the NEXT purchase of the
+    // same SKU fails with ITEM_ALREADY_OWNED. Consume before the idempotency
+    // transaction (single Google call, never inside the Firestore tx).
+    await consumePurchase({ productId: consoleId, purchaseToken }).catch((err) => {
+      const code = err?.code ?? err?.status;
+      const isOwned = /already.?owned|ITEM_ALREADY_OWNED|consumptionState/i.test(err?.message ?? String(code));
+      if (!isOwned) {
+        // Non-"already owned" consume failures shouldn't block a verified top-up.
+        console.error('deposit consume failed (non-ITEM_ALREADY_OWNED):', err?.message ?? err);
+      }
+    });
+
     await runTransaction(async (tx) => {
       // Idempotent: check for an existing completed purchase with this token.
       const existingPurchase = await inTxGet(tx, COLS.promptPurchases, purchaseRowId);
@@ -327,6 +391,8 @@ export async function handleDepositTopUp({ userId, productId, purchaseToken }) {
 
       // Credit the wallet: NET → deposits, gateway fee → bonus vintage.
       // (The gateway fee is the platform's cost, recycled as retention credit.)
+      // The vintage's creditId IS this purchase row id — per-purchase, so a
+      // refund of one deposit no longer wipes a whole pooled pack.
       creditDepositTopUpTx(tx, {
         userId,
         priceInr,
@@ -338,7 +404,18 @@ export async function handleDepositTopUp({ userId, productId, purchaseToken }) {
     });
 
     // Acknowledge AFTER successful grant — prevents Google's 3-day auto-refund.
-    await acknowledgePurchase({ productId: consoleId, purchaseToken }).catch(() => {});
+    await acknowledgePurchaseWithRetry({ productId: consoleId, purchaseToken }).catch(() => {});
+
+    // Inbox notification for the buyer (deduped by this purchase row).
+    notify({
+      userId,
+      type: 'deposit_credit',
+      title: 'Top-up successful',
+      body: `₹${priceInr} added to your wallet (₹${netDeposit} deposit + ₹${gatewayFeeInr} bonus)`,
+      refId: purchaseRowId,
+      dedupeKey: purchaseRowId,
+      data: { productId, priceInr, netDeposit, giftDepositInr: gatewayFeeInr },
+    });
 
     return {
       success: true,

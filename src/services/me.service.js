@@ -187,6 +187,36 @@ export async function setUpiId(userId, upiId) {
   return findByPk(COLS.users, userId);
 }
 
+/**
+ * The creator's saved bank-transfer payout details (withdrawal screen).
+ * Returns just the fields the UI needs — never the full user row.
+ */
+export async function getBankDetails(userId) {
+  const user = await findByPk(COLS.users, userId);
+  return {
+    bankDetails: user
+      ? {
+          panNumber: user.panNumber ?? null,
+          panImageUrl: user.panImageUrl ?? null,
+          bankHolderName: user.bankHolderName ?? null,
+          bankAccountNumber: user.bankAccountNumber ?? null,
+          bankIfsc: user.bankIfsc ?? null,
+          bankBranch: user.bankBranch ?? null,
+          bankAccountImageUrl: user.bankAccountImageUrl ?? null,
+          complete: Boolean(
+            user.panNumber &&
+              user.panImageUrl &&
+              user.bankHolderName &&
+              user.bankAccountNumber &&
+              user.bankIfsc &&
+              user.bankBranch &&
+              user.bankAccountImageUrl,
+          ),
+        }
+      : null,
+  };
+}
+
 /** Save the creator's bank-transfer payout details onto their profile. */
 export async function setBankDetails(userId, fields) {
   await upsert(COLS.users, userId, { ...fields, updatedAt: new Date() });

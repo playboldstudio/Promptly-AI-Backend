@@ -20,6 +20,7 @@ import { getWallet, adjustWallet, calculatePaymentSplit, spendFromWallet, buyPro
 import { rateLimit } from '../middleware/rateLimit.js';
 import { parsePaging } from '../utils/paging.js';
 import { httpError } from '../utils/http-error.js';
+import { playBillingConfigured } from '../lib/playBilling.js';
 
 const router = Router();
 
@@ -30,6 +31,15 @@ const moneyLimiter = rateLimit({ windowMs: 60_000, max: 60, message: 'Too many p
 // without any payment-gateway config; Play Billing verify routes rely on
 // ../lib/playBilling.js which resolves creds via ADC at call time.
 router.use(requireAuth);
+
+// Play Billing verify/void routes need PLAY_BILLING_PACKAGE_NAME set — otherwise
+// a clearly-config issue surfaces as a raw Google 400. Return a clean 503.
+function requirePlayBilling(req, res, next) {
+  if (!playBillingConfigured()) {
+    return next(httpError(503, 'Play Billing is not configured yet — please try again later'));
+  }
+  return next();
+}
 
 // Admin back-office: only emails listed in ADMIN_EMAILS may settle payouts.
 function requireAdmin(req, res, next) {
@@ -62,7 +72,7 @@ const playBillingVoidSchema = z.object({
  *   - ad_free            → one-time ad-free purchase (non-consumable)
  *   - deposit_*          → deposit top-up (consumable, fee recycled as bonus)
  */
-router.post('/playbilling/verify', moneyLimiter, async (req, res, next) => {
+router.post('/playbilling/verify', moneyLimiter, requirePlayBilling, async (req, res, next) => {
   try {
     const parsed = playBillingVerifySchema.safeParse(req.body ?? {});
     if (!parsed.success) return next(httpError(400, 'Missing purchase details'));
@@ -198,7 +208,7 @@ const walletSpendSchema = z.object({
  * as the residual the caller pays via a real Play Billing purchase. Idempotent
  * by `refId` — a replay returns the same result without double-debiting.
  */
-router.post('/wallet/spend', moneyLimiter, requireAuth, async (req, res, next) => {
+router.post('/wallet/spend', moneyLimiter, async (req, res, next) => {
   try {
     const parsed = walletSpendSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -247,7 +257,7 @@ const walletBuySchema = z.object({
  * buyerPaysInr, transactionFeeInr, wallet }
  * On insufficient funds → 402 { error, shortfall } and the client routes to Top-up.
  */
-router.post('/wallet/buy', moneyLimiter, requireAuth, async (req, res, next) => {
+router.post('/wallet/buy', moneyLimiter, async (req, res, next) => {
   try {
     const parsed = walletBuySchema.safeParse(req.body ?? {});
     if (!parsed.success) {

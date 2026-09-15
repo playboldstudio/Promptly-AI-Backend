@@ -2,7 +2,7 @@ import { Router, raw } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
 import { isAdminEmail } from '../config/env.js';
-import { getProfile, getMyPrompts, getSavedPrompts, getPurchasedPrompts, getTopUpHistory, getTransactions, setUpiId, setBankDetails, clearBankDetails, deleteAccount, updateProfile } from '../services/me.service.js';
+import { getProfile, getMyPrompts, getSavedPrompts, getPurchasedPrompts, getTopUpHistory, getTransactions, getBankDetails, setUpiId, setBankDetails, clearBankDetails, deleteAccount, updateProfile } from '../services/me.service.js';
 import { getEarningsSummary, getEarningsByPrompt } from '../services/earnings.service.js';
 import { listNotifications, markNotificationsRead } from '../services/notifications.service.js';
 import { uploadImage } from '../services/storage.service.js';
@@ -164,6 +164,19 @@ router.post('/upi', async (req, res, next) => {
     if (!parsed.success) return next(httpError(400, parsed.error.issues[0]?.message ?? 'Invalid body — expected { upiId: string }'));
     const user = await setUpiId(req.userId, parsed.data.upiId);
     return res.json({ user });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * GET /me/bank — the creator's saved bank-transfer details for the
+ * withdrawal screen (PAN, account, IFSC, branch, KYC images). Read-only.
+ */
+router.get('/bank', async (req, res, next) => {
+  try {
+    const result = await getBankDetails(req.userId);
+    return res.json(result);
   } catch (err) {
     return next(err);
   }
