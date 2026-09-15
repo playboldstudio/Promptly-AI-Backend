@@ -234,14 +234,17 @@ const walletBuySchema = z.object({
 
 /**
  * POST /payments/wallet/buy — buy a paid prompt's unlock ENTIRELY from the user
- * wallet (no Play Billing, no purchase token). In one transaction: debits the
- * wallet split (deposits → earnings → bonus), writes the completed
- * `prompt_purchases` row (`gateway:'wallet'`), credits the author's earnings the
- * gross price, and appends the sale ledger row. Idempotent by `refId`
- * (`prompt_<id>` — the same claim seam as wallet/spend), so a retry never
- * double-charges.
+ * wallet (no Play Billing, no purchase token). The buyer pays `price × 1.05`
+ * (5% transaction fee, mirroring Play's prompt fee); the wallet covers the whole
+ * amount. In one transaction: debits the wallet split (deposits → earnings →
+ * bonus, bonus ≤ 10% of the total due), writes the completed `prompt_purchases`
+ * row (`gateway:'wallet'`, with `buyerPaysInr` + `transactionFeeInr`), credits
+ * the author's earnings the gross price, and appends the sale ledger row.
+ * Idempotent by `refId` (`prompt_<id>` — the same claim seam as wallet/spend),
+ * so a retry never double-charges.
  *
- * Body: { itemPriceInr, refId } → { success, unlocked, promptId, purchaseId, buyerPaysInr, wallet }
+ * Body: { itemPriceInr, refId } → { success, unlocked, promptId, purchaseId,
+ * buyerPaysInr, transactionFeeInr, wallet }
  * On insufficient funds → 402 { error, shortfall } and the client routes to Top-up.
  */
 router.post('/wallet/buy', moneyLimiter, requireAuth, async (req, res, next) => {

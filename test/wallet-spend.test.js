@@ -83,3 +83,50 @@ test('wallet-buy: an empty wallet yields the full shortfall (drives the Top-up p
   assert.equal(split.totalCovered, 0);
   assert.equal(split.remaining, 60); // the gap the UI shows as "Top up ₹60"
 });
+
+test('wallet-buy: wallet must cover price + 5% fee (totalDue = price × 1.05)', () => {
+  // Price ₹60 → buyer pays ₹63. A ₹60 wallet can't cover the total due.
+  const price = 60;
+  const totalDue = Math.round(price * 1.05 * 100) / 100; // 63
+  const split = calculateSplitFromBalances(balances({ deposits: 60 }), totalDue);
+  assert.equal(split.totalCovered, 60);
+  assert.equal(split.remaining, 3); // shortfall vs totalDue (fee not covered)
+});
+
+test('wallet-buy: full cover when balances exceed price + fee (bonus capped on totalDue)', () => {
+  // Price ₹100 → totalDue ₹105. Deposits cover it fully.
+  const price = 100;
+  const totalDue = Math.round(price * 1.05 * 100) / 100; // 105
+  const split = calculateSplitFromBalances(balances({ deposits: 200 }), totalDue);
+  assert.deepEqual(split.split, [{ balanceType: 'deposits', amountToUse: 105 }]);
+  assert.equal(split.totalCovered, 105);
+  assert.equal(split.remaining, 0);
+});
+
+test('wallet-buy: bonus cap applies to totalDue, not the raw price', () => {
+  // Price ₹100 → totalDue ₹105. Bonus is capped at 10% OF THE TOTAL (₹10.5),
+  // same FEFO/percent rule as any purchase — never more than 10% of what's due.
+  const price = 100;
+  const totalDue = Math.round(price * 1.05 * 100) / 100; // 105
+  const split = calculateSplitFromBalances(balances({ deposits: 0, earnings: 0, bonus: 500 }), totalDue);
+  assert.deepEqual(split.split, [{ balanceType: 'bonus', amountToUse: 10.5 }]);
+  assert.equal(split.totalCovered, 10.5);
+  assert.equal(split.remaining, 94.5);
+});
+
+test('wallet-buy: deposits+earnings+bonus together must cover price + fee', () => {
+  // Price ₹200 → totalDue ₹210. deposits+earnings pay 100%, bonus helps after.
+  const price = 200;
+  const totalDue = Math.round(price * 1.05 * 100) / 100; // 210
+  const split = calculateSplitFromBalances(
+    balances({ deposits: 100, earnings: 100, bonus: 100 }),
+    totalDue,
+  );
+  assert.deepEqual(split.split, [
+    { balanceType: 'deposits', amountToUse: 100 },
+    { balanceType: 'earnings', amountToUse: 100 },
+    { balanceType: 'bonus', amountToUse: 10 }, // min(100, 21 (10% of 210), 10)
+  ]);
+  assert.equal(split.totalCovered, 210);
+  assert.equal(split.remaining, 0);
+});

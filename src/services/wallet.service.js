@@ -684,19 +684,28 @@ export async function spendFromWallet({ userId, itemPriceInr, refId, note }) {
 
 /**
  * Buy a paid prompt's unlock entirely from the user's wallet — the pure-wallet
- * counterpart to Play Billing's `grantPromptUnlock` (no purchase token, no
- * 5% tx fee, no gateway fee). In ONE Firestore transaction:
+ * counterpart to Play Billing's `grantPromptUnlock`. Mirrors its fee: the buyer
+ * pays `price × 1.05` (5% transaction fee), and the wallet covers the WHOLE
+ * amount in ONE transaction (no second payment):
  *
- *   1. debits the wallet borrows each split bucket (deposits → earnings → bonus,
- *      bonus capped at 10%) via `debitBalances` — throws when a bucket can't cover,
+ *   1. debits the wallet each split bucket (deposits → earnings → bonus,
+ *      bonus capped at 10% of the total due, i.e. price + fee) via
+ *      `debitBalances` — throws when a bucket can't cover,
  *   2. writes the deterministic `prompt_purchases/{buyerId}_{promptId}` row
- *      (`gateway:'wallet'`, `status:'completed'`) so `getPromptById` /
- *      `getPurchasedPrompts` treat the prompt as unlocked, and
+ *      (`gateway:'wallet'`, `status:'completed'`, with `buyerPaysInr` = price
+ *      + fee and `transactionFeeInr`), so `getPromptById` / `getPurchasedPrompts`
+ *      treat the prompt as unlocked, and
  *   3. credits the author's `earnings` the FULL gross price + a
  *      `paid_prompt_sale` ledger row to their transactions feed.
  *
+ * When the wallet can't cover the total due, returns a 402 with `shortfall`
+ * (measured against `buyerPaysInr` — price + fee) so the UI routes to Top-up.
+ *
  * Idempotent by `refId` (same `wallet_spend:` claim seam as [spendFromWallet]) —
  * a replay returns the existing purchase without double-debiting.
+ *
+ * Returns `{ success, unlocked, promptId, purchaseId, buyerPaysInr,
+ * transactionFeeInr, wallet }` or `{ error: { status, message }, shortfall? }`.
  */
 export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refId }) {
   if (!refId || !String(refId).trim() || !String(refId).startsWith('prompt_')) {
@@ -737,12 +746,19 @@ export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refI
     return { error: { status: 400, message: 'Price mismatch — refresh and try again' } };
   }
 
-  // Re-validate that the wallet can actually cover the full price (never trust
-  // the client's preview). `debitBalances` throws `{ insufficient }` below if a
-  // bucket can't cover its entry — translate to a friendly 400.
-  const split = await calculatePaymentSplit(userId, priceInr);
-  if (split.totalCovered < priceInr - 0.001) {
-    const shortfall = toMoney(priceInr - split.totalCovered);
+  // Mirror grantPromptUnlock's fee: wallet prompt buys carry a 5% transaction
+  // fee on top of the prompt price (price × 1.05). The wallet covers the WHOLE
+  // amount — price + fee — so the buyer never sees a second payment.
+  const buyerPaysInr = toMoney(priceInr * 1.05);
+  const transactionFeeInr = toMoney(buyerPaysInr - priceInr);
+
+  // Re-validate that the wallet can actually cover the TOTAL due (price + 5%
+  // fee), never trust the client's preview. `debitBalances` throws
+  // `{ insufficient }` below if a bucket can't cover its entry — translate to
+  // a friendly 402 (shortfall measured against buyerPaysInr).
+  const split = await calculatePaymentSplit(userId, buyerPaysInr);
+  if (split.totalCovered < buyerPaysInr - 0.001) {
+    const shortfall = toMoney(buyerPaysInr - split.totalCovered);
     return {
       error: { status: 402, message: `Insufficient wallet balance — add ₹${shortfall} to continue` },
       shortfall,
@@ -788,8 +804,8 @@ export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refI
         promptId,
         authorId: prompt.authorId ?? null,
         priceInr,
-        buyerPaysInr: priceInr, // wallet = no 5% tx fee
-        transactionFeeInr: 0,
+        buyerPaysInr, // price + 5% tx fee — the wallet covers the whole amount
+        transactionFeeInr,
         platformFeePercent: authorFeePercent,
         netInr,
         gateway: 'wallet',
@@ -827,7 +843,7 @@ export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refI
     if (err.alreadyOwns) return { error: { status: 409, message: 'You already own this prompt' } };
     if (/ABORTED|already exists/i.test(err.message)) return { error: { status: 409, message: 'You already own this prompt' } };
     if (err.insufficient) {
-      const shortfall = toMoney(priceInr - (await walletCovered(userId, priceInr)));
+      const shortfall = toMoney(buyerPaysInr - (await walletCovered(userId, buyerPaysInr)));
       return { error: { status: 402, message: `Insufficient wallet balance — add ₹${shortfall} to continue` }, shortfall };
     }
     throw err;
@@ -838,7 +854,8 @@ export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refI
     unlocked: true,
     promptId,
     purchaseId,
-    buyerPaysInr: priceInr,
+    buyerPaysInr,
+    transactionFeeInr,
     wallet: (await getWallet(userId)).balances,
   };
 }

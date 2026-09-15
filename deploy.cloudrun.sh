@@ -32,6 +32,9 @@ echo "Image:    ${IMAGE}"
 gcloud builds submit --tag "$IMAGE" .
 
 # Deploy. Adjust secret references to match your Secret Manager entries.
+# PLAY_BILLING_PACKAGE_NAME defaults to the app's package so Play Billing verify
+# calls always carry a real packageName (empty → Google API 400s every verify).
+: "${PLAY_BILLING_PACKAGE_NAME:=com.playboldstudio.promptlyai}"
 gcloud run deploy "$SERVICE" \
   --image "$IMAGE" \
   --region "$REGION" \
@@ -40,7 +43,7 @@ gcloud run deploy "$SERVICE" \
   --min-instances 0 \
   --max-instances 5 \
   --timeout 300 \
-  --set-env-vars "NODE_ENV=production,FIREBASE_PROJECT_ID=${PROJECT_ID},FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-},PLAY_BILLING_PACKAGE_NAME=${PLAY_BILLING_PACKAGE_NAME:-},RTDN_SUBSCRIPTION=${RTDN_SUBSCRIPTION:-}" \
+  --set-env-vars "NODE_ENV=production,FIREBASE_PROJECT_ID=${PROJECT_ID},FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-},PLAY_BILLING_PACKAGE_NAME=${PLAY_BILLING_PACKAGE_NAME},RTDN_SUBSCRIPTION=${RTDN_SUBSCRIPTION:-}" \
   --set-secrets \
     "FIREBASE_CLIENT_EMAIL=firebase-client-email:latest,FIREBASE_PRIVATE_KEY=firebase-private-key:latest"
 
