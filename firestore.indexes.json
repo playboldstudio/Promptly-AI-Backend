@@ -108,6 +108,23 @@
       ]
     },
     {
+      "collectionGroup": "prompt_purchases",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "buyerId", "order": "ASCENDING" },
+        { "fieldPath": "gatewayOrderToken", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "prompt_purchases",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "buyerId", "order": "ASCENDING" },
+        { "fieldPath": "gatewayOrderToken", "order": "ASCENDING" },
+        { "fieldPath": "promptId", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "prompts",
       "queryScope": "COLLECTION",
       "fields": [
