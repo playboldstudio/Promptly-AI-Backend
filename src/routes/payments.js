@@ -16,7 +16,7 @@ import { activateSubscriptionFromToken, cancelActiveSubscription } from '../serv
 import { isDepositProduct, isAdFreeProduct } from '../services/payments/products.js';
 import { PRODUCT_TO_PLAN } from '../services/payments/plans.js';
 import { internalProductId, playConsoleProductId } from '../services/payments/playConsoleIds.js';
-import { getWallet, adjustWallet, calculatePaymentSplit, spendFromWallet } from '../services/wallet.service.js';
+import { getWallet, adjustWallet, calculatePaymentSplit, spendFromWallet, buyPromptWithWallet } from '../services/wallet.service.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { parsePaging } from '../utils/paging.js';
 import { httpError } from '../utils/http-error.js';
@@ -221,6 +221,42 @@ const payoutSchema = z.object({ amountInr: z.number().int().positive() });
 router.get('/payouts/eligibility', async (req, res, next) => {
   try {
     const result = await withdrawalEligibility(req.userId);
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+const walletBuySchema = z.object({
+  itemPriceInr: z.number().positive().finite(),
+  refId: z.string().trim().min(1).max(300),
+});
+
+/**
+ * POST /payments/wallet/buy — buy a paid prompt's unlock ENTIRELY from the user
+ * wallet (no Play Billing, no purchase token). In one transaction: debits the
+ * wallet split (deposits → earnings → bonus), writes the completed
+ * `prompt_purchases` row (`gateway:'wallet'`), credits the author's earnings the
+ * gross price, and appends the sale ledger row. Idempotent by `refId`
+ * (`prompt_<id>` — the same claim seam as wallet/spend), so a retry never
+ * double-charges.
+ *
+ * Body: { itemPriceInr, refId } → { success, unlocked, promptId, purchaseId, buyerPaysInr, wallet }
+ * On insufficient funds → 402 { error, shortfall } and the client routes to Top-up.
+ */
+router.post('/wallet/buy', moneyLimiter, requireAuth, async (req, res, next) => {
+  try {
+    const parsed = walletBuySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return next(httpError(400, 'Invalid request body — expected itemPriceInr and refId'));
+    }
+    const { itemPriceInr, refId } = parsed.data;
+    // refId is `prompt_<id>` — parse the prompt id from it (server-authoritative).
+    const promptId = String(refId).startsWith('prompt_') ? String(refId).slice('prompt_'.length) : '';
+    if (!promptId) return next(httpError(400, 'refId must look like prompt_<id>'));
+
+    const result = await buyPromptWithWallet({ userId: req.userId, itemPriceInr, promptId, refId });
+    if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json(result);
   } catch (err) {
     return next(err);

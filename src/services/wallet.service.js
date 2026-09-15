@@ -9,13 +9,14 @@ import {
   queryAll,
 } from '../db/firestoreRepo.js';
 import { runTransaction } from '../db/config.js';
-import { env } from '../config/env.js';
+import { env, isAdminEmail } from '../config/env.js';
 import {
   BALANCE_TYPES,
   getBalanceType,
   getBalanceTypesByPriority,
   zeroBalances,
 } from './payments/balance-types.js';
+import { currentActiveSubscriptionWithPlan } from './payments/subscription-utils.js';
 
 /**
  * Multi-balance wallet (Phase 2 — plans/wallet.md).
@@ -679,4 +680,223 @@ export async function spendFromWallet({ userId, itemPriceInr, refId, note }) {
     remaining: split.remaining,
     wallet: (await getWallet(userId)).balances,
   };
+}
+
+/**
+ * Buy a paid prompt's unlock entirely from the user's wallet — the pure-wallet
+ * counterpart to Play Billing's `grantPromptUnlock` (no purchase token, no
+ * 5% tx fee, no gateway fee). In ONE Firestore transaction:
+ *
+ *   1. debits the wallet borrows each split bucket (deposits → earnings → bonus,
+ *      bonus capped at 10%) via `debitBalances` — throws when a bucket can't cover,
+ *   2. writes the deterministic `prompt_purchases/{buyerId}_{promptId}` row
+ *      (`gateway:'wallet'`, `status:'completed'`) so `getPromptById` /
+ *      `getPurchasedPrompts` treat the prompt as unlocked, and
+ *   3. credits the author's `earnings` the FULL gross price + a
+ *      `paid_prompt_sale` ledger row to their transactions feed.
+ *
+ * Idempotent by `refId` (same `wallet_spend:` claim seam as [spendFromWallet]) —
+ * a replay returns the existing purchase without double-debiting.
+ */
+export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refId }) {
+  if (!refId || !String(refId).trim() || !String(refId).startsWith('prompt_')) {
+    return { error: { status: 400, message: 'refId must look like prompt_<id> for idempotency' } };
+  }
+  const idFromRef = String(refId).slice('prompt_'.length);
+  if (idFromRef && idFromRef !== promptId) {
+    return { error: { status: 400, message: 'refId does not match the prompt' } };
+  }
+  if (!userId) return { error: { status: 401, message: 'Not authenticated' } };
+
+  const prompt = await findByPk(COLS.prompts, promptId);
+  if (!prompt || prompt.status !== 'published') {
+    return { error: { status: 404, message: 'Prompt not found' } };
+  }
+  if (!prompt.isPaid || !prompt.priceInr) {
+    return { error: { status: 400, message: 'This prompt is free — nothing to pay' } };
+  }
+
+  // Admins have full access — never pay.
+  const buyer = await findByPk(COLS.users, userId);
+  if (buyer && isAdminEmail(buyer.email)) {
+    return { error: { status: 409, message: 'You have full admin access — this prompt is already unlocked' } };
+  }
+
+  // One unlock per buyer per prompt — reject if already purchased.
+  const purchaseId = `${userId}_${promptId}`;
+  const existing = await findByPk(COLS.promptPurchases, purchaseId);
+  if (existing) {
+    return { error: { status: 409, message: 'You already own this prompt' } };
+  }
+
+  const priceInr = toMoney(Number(prompt.priceInr) || 0);
+
+  // Re-validate the client's stated price matches the server price — never trust
+  // a stale / forged amount in what the buyer is charged.
+  if (itemPriceInr != null && Math.abs(Number(itemPriceInr) - priceInr) > 0.001) {
+    return { error: { status: 400, message: 'Price mismatch — refresh and try again' } };
+  }
+
+  // Re-validate that the wallet can actually cover the full price (never trust
+  // the client's preview). `debitBalances` throws `{ insufficient }` below if a
+  // bucket can't cover its entry — translate to a friendly 400.
+  const split = await calculatePaymentSplit(userId, priceInr);
+  if (split.totalCovered < priceInr - 0.001) {
+    const shortfall = toMoney(priceInr - split.totalCovered);
+    return {
+      error: { status: 402, message: `Insufficient wallet balance — add ₹${shortfall} to continue` },
+      shortfall,
+    };
+  }
+
+  // Snapshot the seller's platform-fee % (Pro 15 / Creator 5), same as grant.
+  const authorSub = await currentActiveSubscriptionWithPlan(prompt.authorId);
+  const authorFeePercent = authorSub?.plan?.platformFeePercent ?? 5;
+  const netInr = toMoney(priceInr - toMoney((priceInr * authorFeePercent) / 100));
+
+  const ledgerRefId = `wallet_spend:${String(refId)}`;
+
+  try {
+    await runTransaction(async (tx) => {
+      // Already-owns race guard inside the tx.
+      const already = await inTxGet(tx, COLS.promptPurchases, purchaseId);
+      if (already) throw Object.assign(new Error('already-owns'), { alreadyOwns: true });
+
+      // Firestore forbids reads AFTER writes inside a transaction — pre-read the
+      // buyer wallet ONCE before any write, then compute all debits off it.
+      const buyerWallet = (await inTxGet(tx, COLS.userWallets, userId)) ?? zeroBalances();
+      const authorWallet =
+        prompt.authorId
+          ? (await inTxGet(tx, COLS.userWallets, prompt.authorId)) ?? zeroBalances()
+          : null;
+
+      // 1) Debit the wallet — per-bucket ledger rows, from the pre-read balance.
+      for (const s of split.split) {
+        await debitBalancesTx(
+          tx,
+          userId,
+          buyerWallet,
+          s.balanceType,
+          s.amountToUse,
+          { type: 'wallet_spend', refId: ledgerRefId, note: `Wallet purchase of "${prompt.title}"` },
+        );
+      }
+
+      // 2) Purchase row (deterministic id — one per buyer per prompt).
+      inTxSet(tx, COLS.promptPurchases, purchaseId, {
+        buyerId: userId,
+        promptId,
+        authorId: prompt.authorId ?? null,
+        priceInr,
+        buyerPaysInr: priceInr, // wallet = no 5% tx fee
+        transactionFeeInr: 0,
+        platformFeePercent: authorFeePercent,
+        netInr,
+        gateway: 'wallet',
+        gatewayFeeInr: 0,
+        gatewayFeePercent: 0,
+        gatewayFeeSource: 'wallet',
+        status: 'completed',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      // 3) Creator earnings — credit the FULL gross price (withdrawal fee at payout).
+      if (prompt.authorId && authorWallet) {
+        const newEarnings = toMoney(Number(authorWallet.earnings ?? 0) + priceInr);
+        inTxSet(tx, COLS.userWallets, prompt.authorId, {
+          earnings: newEarnings,
+          updatedAt: new Date(),
+        });
+        inTxAdd(tx, COLS.transactions, {
+          userId: prompt.authorId,
+          type: 'paid_prompt_sale',
+          direction: 'credit',
+          amountInr: priceInr,
+          balanceType: 'earnings',
+          balanceAfterInr: newEarnings,
+          refId: purchaseId,
+          note: `Sale of "${prompt.title}" — gross ${priceInr} (withdrawal fee at payout)`,
+          gateway: 'wallet',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      }
+    });
+  } catch (err) {
+    if (err.alreadyOwns) return { error: { status: 409, message: 'You already own this prompt' } };
+    if (/ABORTED|already exists/i.test(err.message)) return { error: { status: 409, message: 'You already own this prompt' } };
+    if (err.insufficient) {
+      const shortfall = toMoney(priceInr - (await walletCovered(userId, priceInr)));
+      return { error: { status: 402, message: `Insufficient wallet balance — add ₹${shortfall} to continue` }, shortfall };
+    }
+    throw err;
+  }
+
+  return {
+    success: true,
+    unlocked: true,
+    promptId,
+    purchaseId,
+    buyerPaysInr: priceInr,
+    wallet: (await getWallet(userId)).balances,
+  };
+}
+
+/**
+ * Debit a single bucket inside an already-open transaction, computed off a
+ * caller's PRE-READ wallet. Callers must pre-read `userWallets/{userId}` before
+ * any write (Firestore forbid reads-after-writes). Throws `{ insufficient,
+ * balanceType }` when a bucket can't cover its entry (caller → friendly 402).
+ */
+async function debitBalancesTx(tx, userId, wallet, balanceType, amountInr, meta) {
+  const bt = getBalanceType(balanceType);
+  if (!bt) throw new Error(`Unknown balance type: ${balanceType}`);
+  const amount = toMoney(amountInr);
+  if (amount <= 0) return null;
+
+  if (bt.id === 'bonus') {
+    const { vintages, consumed } = consumeBonusVintages(wallet.bonusVintages ?? {}, amount);
+    const newBonus = bonusFromVintages(vintages);
+    inTxSet(tx, COLS.userWallets, userId, { bonus: newBonus, bonusVintages: vintages, updatedAt: new Date() });
+    inTxAdd(tx, COLS.transactions, {
+      userId,
+      type: meta?.type ?? 'bonus_debit',
+      direction: 'debit',
+      amountInr: amount,
+      balanceType: 'bonus',
+      balanceAfterInr: newBonus,
+      refId: meta?.refId ?? null,
+      note: meta?.note ?? `Spent ${amount} bonus`,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    return { balanceType: 'bonus', debited: amount, newBalance: newBonus, consumed };
+  }
+
+  const cur = bucketAmount(wallet, bt.id);
+  if (cur < amount) {
+    throw Object.assign(new Error(`Insufficient ${bt.id} balance`), { insufficient: true, balanceType: bt.id });
+  }
+  const newBalance = toMoney(cur - amount);
+  inTxSet(tx, COLS.userWallets, userId, { [bt.id]: newBalance, updatedAt: new Date() });
+  inTxAdd(tx, COLS.transactions, {
+    userId,
+    type: meta?.type ?? `${bt.id}_debit`,
+    direction: 'debit',
+    amountInr: amount,
+    balanceType: bt.id,
+    balanceAfterInr: newBalance,
+    refId: meta?.refId ?? null,
+    note: meta?.note ?? `Spent ${amount} ${bt.id}`,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+  return { balanceType: bt.id, debited: amount, newBalance };
+}
+
+/** How much of `itemPriceInr` the wallet currently covers (for 402 shortfall math). */
+export async function walletCovered(userId, itemPriceInr) {
+  const split = await calculatePaymentSplit(userId, itemPriceInr);
+  return toMoney(split.totalCovered);
 }

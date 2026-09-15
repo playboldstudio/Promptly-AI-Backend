@@ -66,3 +66,20 @@ test('wallet-spend: only unused balance types appear in the split (deposits exha
   assert.equal(split.totalCovered, 100);
   assert.equal(split.remaining, 0);
 });
+
+test('wallet-buy: a full price is fully covered when balances exceed it (no Play Billing residual)', () => {
+  // Mirrors what buyPromptWithWallet's coverage guard checks: totalCovered ≥ price.
+  const split = calculateSplitFromBalances(
+    balances({ deposits: 100 }),
+    60,
+  );
+  assert.equal(split.totalCovered, 60);
+  assert.equal(split.remaining, 0);
+  assert.equal(split.split.some((s) => s.balanceType === 'bonus'), false);
+});
+
+test('wallet-buy: an empty wallet yields the full shortfall (drives the Top-up path)', () => {
+  const split = calculateSplitFromBalances(balances(), 60);
+  assert.equal(split.totalCovered, 0);
+  assert.equal(split.remaining, 60); // the gap the UI shows as "Top up ₹60"
+});
