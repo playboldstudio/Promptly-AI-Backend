@@ -6,6 +6,13 @@ import { isAdminEmail } from '../config/env.js';
 import { bulkUploadPrompts } from '../services/bulk-prompts.service.js';
 import { normalizeImageName, validateBulkRows, IMAGE_MIME_BY_EXT } from '../utils/prompt-import.js';
 import { httpError } from '../utils/http-error.js';
+import { parsePaging } from '../utils/paging.js';
+import {
+  getModerationQueue,
+  approveAppeal,
+  rejectAppeal,
+  dismissReport,
+} from '../services/moderation.service.js';
 
 /**
  * Admin bulk prompt import.
@@ -180,5 +187,68 @@ router.post(
     }
   },
 );
+
+/* ── Admin moderation queue ────────────────────────────────────────────────────
+ * Report → soft-delete → appeal → admin approve/reject/dismiss workflow
+ * (plans/moderation.md §4-7). Only emails in ADMIN_EMAILS may moderate.
+ */
+
+/**
+ * GET /admin/prompts/reports?status=reported|appealed — the moderation queue.
+ * Each entry joins the prompt with its pending reports, reasons, and appeal.
+ */
+router.get('/admin/prompts/reports', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { status } = req.query;
+    const result = await getModerationQueue({
+      status,
+      ...parsePaging(req.query),
+    });
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * POST /admin/prompts/:id/approve — approve a creator appeal → restore to
+ * 'published' and reset report counters.
+ */
+router.post('/admin/prompts/:id/approve', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const result = await approveAppeal({ promptId: req.params.id });
+    if (result.error) return next(httpError(result.error.status, result.error.message));
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * POST /admin/prompts/:id/reject — reject a creator appeal → hard-delete.
+ */
+router.post('/admin/prompts/:id/reject', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const result = await rejectAppeal({ promptId: req.params.id });
+    if (result.error) return next(httpError(result.error.status, result.error.message));
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * POST /admin/prompts/:id/dismiss-report — dismiss reports below threshold,
+ * restore the prompt to published, clear counters.
+ */
+router.post('/admin/prompts/:id/dismiss-report', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const result = await dismissReport({ promptId: req.params.id });
+    if (result.error) return next(httpError(result.error.status, result.error.message));
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
 
 export default router;

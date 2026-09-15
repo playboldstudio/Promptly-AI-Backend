@@ -1,10 +1,10 @@
 import { COLS, queryAll, getMany } from '../db/firestoreRepo.js';
-import { balanceFor } from './ledger.js';
 import { withdrawalEligibility } from './payments/payouts.service.js';
+import { getWallet } from './wallet.service.js';
 
 /**
- * Creator earnings — derived from prompt_purchases + payouts + ledger.
- * All amounts are integer rupees.
+ * Creator earnings — derived from prompt_purchases (per-prompt breakdown) and
+ * the wallet `earnings` balance + payouts (summary). All amounts are rupees.
  */
 
 export async function getEarningsByPrompt(authorId) {
@@ -16,7 +16,8 @@ export async function getEarningsByPrompt(authorId) {
   const byPrompt = new Map();
   rows.forEach((r) => {
     const entry = byPrompt.get(r.promptId) ?? { totalInr: 0, salesCount: 0 };
-    entry.totalInr += Number(r.netInr) || 0;
+    // Gross earnings per prompt — the full price (withdrawal fee applies at payout).
+    entry.totalInr += Number(r.priceInr) || 0;
     entry.salesCount += 1;
     byPrompt.set(r.promptId, entry);
   });
@@ -34,20 +35,21 @@ export async function getEarningsByPrompt(authorId) {
 }
 
 /**
- * Earnings summary: lifetime net, withdrawn, pending payouts, available balance.
+ * Earnings summary: lifetime gross, withdrawn, pending payouts, available balance.
  */
 export async function getEarningsSummary(authorId) {
-  const [sales, payoutRows, balance, elig] = await Promise.all([
-    queryAll({
-      collection: COLS.promptPurchases,
-      filters: [{ field: 'authorId', value: authorId }, { field: 'status', value: 'completed' }],
-    }),
+  const [payoutRows, wallet, elig] = await Promise.all([
     queryAll({ collection: COLS.payouts, filters: [{ field: 'userId', value: authorId }] }),
-    balanceFor(authorId),
+    getWallet(authorId),
     withdrawalEligibility(authorId),
   ]);
 
-  const totalEarnings = sales.rows.reduce((sum, s) => sum + (Number(s.netInr) || 0), 0);
+  // Lifetime GROSS earnings from sales (full prompt prices, withdrawal fee at payout).
+  const sales = await queryAll({
+    collection: COLS.promptPurchases,
+    filters: [{ field: 'authorId', value: authorId }, { field: 'status', value: 'completed' }],
+  });
+  const totalEarnings = sales.rows.reduce((sum, s) => sum + (Number(s.priceInr) || 0), 0);
   const salesCount = sales.rows.length;
 
   const withdrawnInr = payoutRows.rows
@@ -57,16 +59,20 @@ export async function getEarningsSummary(authorId) {
     .filter((p) => p.status === 'pending')
     .reduce((sum, p) => sum + (Number(p.amountInr) || 0), 0);
 
+  // Current earnings balance in the wallet.
+  const earningsBalance = wallet.balances?.earnings?.amountInr ?? 0;
+
   return {
     totalEarnings,
     salesCount,
     withdrawnInr,
     pendingPayouts,
-    balanceInr: balance, // ledger balance, already net of pending payout reservations
+    balanceInr: earningsBalance, // wallet earnings, already net of pending payout reservations
     withdrawableBalance: elig.withdrawableBalance, // what can actually be withdrawn now
     minWithdrawalInr: elig.minWithdrawalInr,
     withdrawalEligible: elig.eligible,
     withdrawalBlockers: elig.blockers,
     currency: elig.currency,
+    wallet: wallet.balances, // full breakdown for the account screen
   };
 }

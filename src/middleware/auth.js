@@ -119,6 +119,8 @@ async function verifyFirebaseToken(token) {
         existing?.avatarUrl
           ? existing.avatarUrl
           : decoded.picture ?? decoded.photoURL ?? null,
+      // signInProvider (e.g. 'google.com') drives the oAuth-only referral gate.
+      signInProvider: decoded.firebase?.sign_in_provider ?? existing?.signInProvider ?? null,
       updatedAt: new Date(),
     };
     if (!existing) patch.createdAt = new Date();

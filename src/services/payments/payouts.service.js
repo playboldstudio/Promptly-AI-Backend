@@ -1,24 +1,15 @@
 import { COLS, findByPk, getMany, queryAll, inTxGet, inTxAdd, inTxSet, inTxQueryAll } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
 import { env } from '../../config/env.js';
-import { writeLedger } from '../ledger.js';
 import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
+import { getWallet } from '../wallet.service.js';
+import { calculateWithdrawal } from './withdrawal-fees.js';
+import { notify } from '../notify.js';
 
 const MIN_WITHDRAWAL_INR = env.MIN_WITHDRAWAL_INR;
 
-/** Flat Razorpay UPI-transfer fee charged on every withdrawal. */
-const RAZORPAY_FEE_PERCENT = 2;
-
-/** GST levied on the Razorpay fee (18% of the 2%). */
-const RAZORPAY_GST_PERCENT = 18;
-
 function err(status, message) {
   return { error: { status, message } };
-}
-
-/** Money precision: rupees with paise — never more than 2 decimals. */
-function toMoney(value) {
-  return Math.round(value * 100) / 100;
 }
 
 /**
@@ -40,48 +31,30 @@ function bankDetailsComplete(user) {
 }
 
 /**
- * Fee breakdown for a withdrawal. Fees are DEDUCTED from the requested amount:
- * 2% Razorpay UPI fee + 18% GST on that fee + the plan's platform fee. Every
- * value is kept to 2 decimal places (paise precision) — no whole-rupee rounding.
- * The admin pays `netInr` to the creator's UPI, the platform keeps the rest.
- * `platformFeePercent` comes from the creator's plan (Pro=5%, Creator=0%).
- */
-function payoutFees(amountInr, platformFeePercent = 0) {
-  const razorpayFeeInr = toMoney((amountInr * RAZORPAY_FEE_PERCENT) / 100);
-  const gstInr = toMoney((razorpayFeeInr * RAZORPAY_GST_PERCENT) / 100);
-  const platformFeeInr = toMoney((amountInr * (platformFeePercent || 0)) / 100);
-  const feeInr = toMoney(razorpayFeeInr + gstInr + platformFeeInr);
-  return {
-    razorpayFeeInr,
-    gstInr,
-    platformFeeInr,
-    feeInr,
-    netInr: toMoney(amountInr - feeInr),
-  };
-}
-
-/**
- * True withdrawable balance — ONLY money earned from paid prompt sales (the
- * author's net share), minus what has already been withdrawn or is reserved by
- * an in-flight payout. Wallet-ledger rows for buyer purchases, subscription
- * payments, and corrections do NOT count toward what a creator can withdraw.
- * Returns a non-negative amount.
+ * True withdrawable balance — the creator's wallet `earnings` (money from paid
+ * prompt sales, credited gross). `requestPayout` debits the full requested
+ * amount from `earnings` at payout creation and `markPayoutFailed` credits it
+ * back, so the wallet ALREADY nets out every outstanding payout — subtracting
+ * payout rows again would double-count them. The wallet is the single source
+ * of truth for the withdrawable figure; `user_balances` is only the legacy
+ * buyer-currency row.
+ *
+ * Returns a non-negative amount. When no wallet exists yet (fresh user before
+ * the Phase 2 migration), the legacy `user_balances.balanceInr` is consulted so
+ * existing creators' balances survive the transition.
  */
 export async function withdrawableBalanceFor(userId) {
-  const [sales, payouts] = await Promise.all([
-    queryAll({
-      collection: COLS.promptPurchases,
-      filters: [{ field: 'authorId', value: userId }, { field: 'status', value: 'completed' }],
-    }),
-    queryAll({ collection: COLS.payouts, filters: [{ field: 'userId', value: userId }] }),
-  ]);
+  const wallet = await getWallet(userId);
 
-  const earnedInr = sales.rows.reduce((sum, s) => sum + (Number(s.netInr) || 0), 0);
-  const reservedInr = payouts.rows
-    .filter((p) => ['pending', 'processing', 'paid'].includes(p.status))
-    .reduce((sum, p) => sum + (Number(p.amountInr) || 0), 0);
+  let earnedInr = wallet.balances?.earnings?.amountInr ?? 0;
 
-  return Math.max(0, earnedInr - reservedInr);
+  // Fallback for pre-wallet users: legacy `user_balances` (read-only support).
+  if (earnedInr === 0) {
+    const legacy = await findByPk(COLS.userBalances, userId);
+    earnedInr = Number(legacy?.balanceInr ?? 0);
+  }
+
+  return Math.max(0, earnedInr);
 }
 
 /**
@@ -108,7 +81,7 @@ export async function withdrawalEligibility(userId) {
   if (!hasBankDetails) blockers.push('Add your bank details (PAN + account) on your profile before withdrawing');
   if (!meetsMinimum) blockers.push(`Earnings below the ₹${MIN_WITHDRAWAL_INR} withdrawal minimum`);
 
-  const fees = payoutFees(withdrawable, platformFeePercent);
+  const fees = calculateWithdrawal({ earningsBalance: withdrawable, platformFeePercent });
 
   return {
     withdrawableBalance: withdrawable,
@@ -120,14 +93,11 @@ export async function withdrawalEligibility(userId) {
     hasPaidPlan,
     meetsMinimum,
     currency: 'INR',
-    razorpayFeePercent: RAZORPAY_FEE_PERCENT,
-    razorpayGstPercent: RAZORPAY_GST_PERCENT,
     platformFeePercent,
     estimatedFeeInr: fees.feeInr,
-    estimatedRazorpayFeeInr: fees.razorpayFeeInr,
-    estimatedGstInr: fees.gstInr,
     estimatedPlatformFeeInr: fees.platformFeeInr,
     estimatedNetInr: fees.netInr,
+    netIfWithdrawNow: fees.netInr,
   };
 }
 
@@ -149,8 +119,11 @@ export async function requestPayout({ userId, amountInr }) {
     return err(403, 'Subscriber only — upgrade to Pro or Creator before withdrawing');
   }
 
-  // Fee breakdown: 2% Razorpay + the plan's platform fee, deducted from payout.
-  const fees = payoutFees(amountInr, sub?.plan?.platformFeePercent ?? 0);
+  // Fee breakdown: only the plan's withdrawal (platform) fee, deducted from payout.
+  const fees = calculateWithdrawal({
+    earningsBalance: amountInr,
+    platformFeePercent: sub?.plan?.platformFeePercent ?? 0,
+  });
 
   // GATE 2 — the creator needs a saved bank-transfer destination + KYC docs.
   if (!bankDetailsComplete(user)) {
@@ -161,13 +134,8 @@ export async function requestPayout({ userId, amountInr }) {
   // Soft-pre-check for a fast 409; the authoritative check runs inside the
   // transaction below so two concurrent requests cannot both pass.
 
-  // GATE 6 — the user may only withdraw money earned from paid prompt sales.
-  const sales = await queryAll({
-    collection: COLS.promptPurchases,
-    filters: [{ field: 'authorId', value: userId }, { field: 'status', value: 'completed' }],
-  });
-  const earnedInr = sales.rows.reduce((sum, s) => sum + (Number(s.netInr) || 0), 0);
-
+  // GATE 6 — the user may only withdraw money earned from paid prompt sales
+  // (their wallet `earnings`). The authoritative check runs in the tx below.
   const withdrawable = await withdrawableBalanceFor(userId);
   if (amountInr > withdrawable) {
     return err(400, `Insufficient sales earnings — you can withdraw up to ₹${withdrawable}`);
@@ -189,19 +157,22 @@ export async function requestPayout({ userId, amountInr }) {
         throw Object.assign(new Error('in-flight'), { inFlight: true });
       }
 
-      // Re-count the reserved amount inside the transaction (authoritative):
-      // earned sales minus pending/processing/paid payouts.
-      const reservedInTx = payoutsInTx
-        .filter((p) => ['pending', 'processing', 'paid'].includes(p.status))
-        .reduce((sum, p) => sum + (Number(p.amountInr) || 0), 0);
-      const withdrawableInTx = Math.max(0, earnedInr - reservedInTx);
+      // Authoritative balance check inside the transaction. The wallet `earnings`
+      // already nets out every prior payout (they were debited at creation and
+      // only credited back on failure), so no amount is subtracted for existing
+      // rows — only this new payout reduces the balance below.
+      const walletInTx = await inTxGet(tx, COLS.userWallets, userId);
+      const earningsInTx = Number(walletInTx?.earnings ?? 0);
+      const withdrawableInTx = Math.max(0, earningsInTx);
       if (amountInr > withdrawableInTx) {
         throw Object.assign(new Error('insufficient'), { insufficient: true });
       }
 
-      // Wallet balance for the ledger row (bookkeeping of the reservation only).
-      const balDoc = await inTxGet(tx, COLS.userBalances, userId);
-      const bal = Number(balDoc?.balanceInr ?? 0);
+      // Debit the wallet's `earnings` balance to reserve the payout. The payout
+      // row + ledger entry live at the same refId; `paid` later is pure
+      // bookkeeping (no second wallet touch).
+      const newEarnings = Math.max(0, earningsInTx - amountInr);
+      inTxSet(tx, COLS.userWallets, userId, { earnings: newEarnings, updatedAt: new Date() });
 
       const ref = inTxAdd(tx, COLS.payouts, {
         userId,
@@ -214,10 +185,6 @@ export async function requestPayout({ userId, amountInr }) {
         bankAccountNumber: user.bankAccountNumber ?? null,
         bankIfsc: user.bankIfsc ?? null,
         bankBranch: user.bankBranch ?? null,
-        razorpayPayoutId: null,
-        bankAccountId: null,
-        razorpayFeeInr: fees.razorpayFeeInr,
-        gstInr: fees.gstInr,
         platformFeeInr: fees.platformFeeInr,
         feeInr: fees.feeInr,
         netInr: fees.netInr,
@@ -227,25 +194,37 @@ export async function requestPayout({ userId, amountInr }) {
         updatedAt: new Date(),
       });
 
-      // Reserve the full requested amount: a debit now, "paid" later is pure
-      // bookkeeping. The admin transfers only `netInr` to the creator's bank.
-      await writeLedger(
-        tx,
-        {
-          userId,
-          type: 'payout',
-          direction: 'debit',
-          amountInr,
-          refId: ref.id,
-          note: `Withdrawal — ₹${amountInr} minus ₹${fees.feeInr} fees (2% Razorpay + 18% GST${fees.platformFeeInr ? ` + ${sub?.plan?.platformFeePercent ?? 0}% platform` : ''}), ${fees.netInr} to bank`,
-          balanceInr: bal,
-        },
-      );
+      // Reserve the full requested amount: a wallet `earnings` debit now; "paid"
+      // later is pure bookkeeping. The admin transfers only `netInr` to the
+      // creator's bank. One ledger row snapshots the post-withdrawal earnings.
+      inTxAdd(tx, COLS.transactions, {
+        userId,
+        type: 'payout',
+        direction: 'debit',
+        amountInr,
+        balanceType: 'earnings',
+        balanceAfterInr: newEarnings,
+        refId: ref.id,
+        note: `Withdrawal — ₹${amountInr} minus ₹${fees.feeInr} withdrawal fee (${sub?.plan?.platformFeePercent ?? 0}%), ₹${fees.netInr} to bank`,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
 
-      return { id: ref.id, balanceAfterInr: withdrawableInTx - amountInr };
+      return { id: ref.id, balanceAfterInr: newEarnings };
     });
 
     const payout = await findByPk(COLS.payouts, payoutId);
+
+    notify({
+      userId,
+      type: 'payout',
+      title: 'Withdrawal requested',
+      body: `Your ₹${amountInr} withdrawal is being processed (≈₹${fees.netInr} to your bank).`,
+      refId: payoutId,
+      dedupeKey: `payout_${payoutId}`,
+      data: { amountInr, netInr: fees.netInr, status: 'pending' },
+    });
+
     return {
       payout: {
         id: payout.id,
@@ -257,8 +236,6 @@ export async function requestPayout({ userId, amountInr }) {
         bankAccountNumber: payout.bankAccountNumber,
         bankIfsc: payout.bankIfsc,
         bankBranch: payout.bankBranch,
-        razorpayFeeInr: payout.razorpayFeeInr,
-        gstInr: payout.gstInr,
         platformFeeInr: payout.platformFeeInr,
         feeInr: payout.feeInr,
         netInr: payout.netInr,
@@ -362,6 +339,17 @@ export async function markPayoutPaid({ payoutId }) {
       });
     });
     const updated = await findByPk(COLS.payouts, payoutId);
+    if (updated?.userId) {
+      notify({
+        userId: updated.userId,
+        type: 'payout',
+        title: 'Withdrawal paid',
+        body: `Your withdrawal of ₹${updated.amountInr} has been paid to your bank.`,
+        refId: payoutId,
+        dedupeKey: `payout_paid_${payoutId}`,
+        data: { amountInr: updated.amountInr, status: 'paid' },
+      });
+    }
     return { payout: updated };
   } catch (error) {
     if (error.claimed) return err(409, 'Payout is no longer pending');
@@ -385,30 +373,44 @@ export async function markPayoutFailed({ payoutId, reason }) {
       if (!fresh || fresh.status !== 'pending') {
         throw Object.assign(new Error('already-claimed'), { claimed: true });
       }
-      // Pre-read the balance BEFORE writing so the reversal writes a valid ledger.
-      const balDoc = await inTxGet(tx, COLS.userBalances, payout.userId);
-      const bal = Number(balDoc?.balanceInr ?? 0);
+      // Pre-read the wallet earnings BEFORE writing so the reversal ledger
+      // snapshots a valid balance.
+      const walletDoc = await inTxGet(tx, COLS.userWallets, payout.userId);
+      const prevEarnings = Number(walletDoc?.earnings ?? 0);
+      const newEarnings = prevEarnings + Number(payout.amountInr || 0);
       inTxSet(tx, COLS.payouts, payoutId, {
         status: 'failed',
         processedAt: new Date(),
         failureReason: reason ?? null,
         updatedAt: new Date(),
       });
-      // Reverse the reservation so the creator can re-request.
-      await writeLedger(
-        tx,
-        {
-          userId: payout.userId,
-          type: 'payout',
-          direction: 'credit',
-          amountInr: payout.amountInr,
-          refId: payout.id,
-          note: 'Withdrawal failed — balance returned',
-          balanceInr: bal,
-        },
-      );
+      // Reverse the reservation into the wallet so the creator can re-request.
+      inTxSet(tx, COLS.userWallets, payout.userId, { earnings: newEarnings, updatedAt: new Date() });
+      inTxAdd(tx, COLS.transactions, {
+        userId: payout.userId,
+        type: 'payout',
+        direction: 'credit',
+        amountInr: payout.amountInr,
+        balanceType: 'earnings',
+        balanceAfterInr: newEarnings,
+        refId: payout.id,
+        note: 'Withdrawal failed — balance returned',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
     });
     const updated = await findByPk(COLS.payouts, payoutId);
+    if (updated?.userId) {
+      notify({
+        userId: updated.userId,
+        type: 'payout',
+        title: 'Withdrawal failed',
+        body: reason ? `Your withdrawal was not processed: ${reason}` : 'Your withdrawal could not be processed. The amount is back in your balance.',
+        refId: payoutId,
+        dedupeKey: `payout_failed_${payoutId}`,
+        data: { amountInr: updated.amountInr, status: 'failed', reason: reason ?? null },
+      });
+    }
     return { payout: updated };
   } catch (error) {
     if (error.claimed) return err(409, 'Payout is no longer pending');

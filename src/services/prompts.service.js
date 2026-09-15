@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { COLS, findByPk, queryAll, removeMany, upsert, create, getMany, increment, countDocuments } from '../db/firestoreRepo.js';
+import { COLS, findByPk, queryAll, remove, removeMany, upsert, create, getMany, increment, countDocuments } from '../db/firestoreRepo.js';
 import { derivePromptFlags } from './prompt-metrics.js';
 import { isAdminEmail } from '../config/env.js';
 import { currentActiveSubscriptionWithPlan } from './payments/subscription-utils.js';

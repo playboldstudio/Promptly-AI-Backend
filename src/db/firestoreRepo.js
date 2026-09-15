@@ -24,8 +24,16 @@ const COLLECTIONS = Object.freeze({
   webhookEvents: 'webhook_events',
   userPosts: 'user_posts',
   userBalances: 'user_balances',
+  userWallets: 'user_wallets',
+  walletSpends: 'wallet_spends',
+  notifications: 'notifications',
   bankAccounts: 'bank_accounts',
   kycVerifications: 'kyc_verifications',
+  referralCodes: 'referral_codes',
+  referrals: 'referrals',
+  deviceFingerprints: 'device_fingerprints',
+  promptReports: 'prompt_reports',
+  promptLikes: 'prompt_likes',
 });
 
 export const COLS = COLLECTIONS;
@@ -64,6 +72,11 @@ export function toWritePayload(obj) {
 
 export function increment(n = 1) {
   return FieldValue.increment(n);
+}
+
+/** Append an element to a Firestore array field (dedupes on `FieldValue` merge). */
+export function arrayUnion(...values) {
+  return FieldValue.arrayUnion(...values);
 }
 
 /**

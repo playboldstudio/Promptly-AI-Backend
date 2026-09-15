@@ -9,6 +9,12 @@ import {
   createPrompt,
   deletePrompt,
 } from '../services/prompts.service.js';
+import {
+  reportPrompt,
+  appealPrompt,
+  toggleLike,
+  sharePrompt,
+} from '../services/moderation.service.js';
 import { optionalAuth, requireAuth } from '../middleware/auth.js';
 import { isAdminEmail } from '../config/env.js';
 import { uploadImage } from '../services/storage.service.js';
@@ -17,8 +23,11 @@ import { moderateImage } from '../services/image-moderation.service.js';
 import { parsePaging } from '../utils/paging.js';
 import { httpError } from '../utils/http-error.js';
 import { PROMPT_CATEGORIES } from '../utils/prompt-import.js';
+import { rateLimit } from '../middleware/rateLimit.js';
 
 const router = Router();
+
+const reportLimiter = rateLimit({ windowMs: 3600_000, max: 5, message: 'Too many reports — try again later' });
 
 const createPromptSchema = z
   .object({
@@ -224,6 +233,84 @@ router.post('/prompts/:id/save', requireAuth, async (req, res, next) => {
 router.post('/prompts/:id/unsave', requireAuth, async (req, res, next) => {
   try {
     const result = await unsavePrompt(req.params.id, req.userId);
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/* ── Moderation: report / like / share / appeal ──────────────────────────────── */
+
+const reportSchema = z.object({
+  reason: z.enum(['spam', 'inappropriate', 'copyright', 'misleading', 'other']),
+  description: z.string().trim().max(500).optional(),
+});
+
+/**
+ * POST /prompts/:id/report — flag a prompt. Rate-limited (5 per user/hour).
+ * Body: { reason, description? }.
+ */
+router.post('/prompts/:id/report', requireAuth, reportLimiter, async (req, res, next) => {
+  try {
+    const parsed = reportSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return next(httpError(400, parsed.error.issues[0]?.message ?? 'Invalid report'));
+    const result = await reportPrompt({
+      promptId: req.params.id,
+      userId: req.userId,
+      reason: parsed.data.reason,
+      description: parsed.data.description,
+    });
+    if (result.error) return next(httpError(result.error.status, result.error.message));
+    return res.status(201).json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+const appealSchema = z.object({
+  reason: z.string().trim().min(10).max(500),
+});
+
+/**
+ * POST /prompts/:id/appeal — creator appeal within 7-day window.
+ * Body: { reason }.
+ */
+router.post('/prompts/:id/appeal', requireAuth, async (req, res, next) => {
+  try {
+    const parsed = appealSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return next(httpError(400, parsed.error.issues[0]?.message ?? 'Please provide a reason for your appeal'));
+    const result = await appealPrompt({
+      promptId: req.params.id,
+      authorId: req.userId,
+      reason: parsed.data.reason,
+    });
+    if (result.error) return next(httpError(result.error.status, result.error.message));
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * POST /prompts/:id/like — toggle like (idempotent).
+ */
+router.post('/prompts/:id/like', requireAuth, async (req, res, next) => {
+  try {
+    const result = await toggleLike({ promptId: req.params.id, userId: req.userId });
+    if (result.error) return next(httpError(result.error.status, result.error.message));
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * POST /prompts/:id/share — increment share count.
+ */
+router.post('/prompts/:id/share', requireAuth, async (req, res, next) => {
+  try {
+    const result = await sharePrompt(req.params.id);
+    if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json(result);
   } catch (err) {
     return next(err);
