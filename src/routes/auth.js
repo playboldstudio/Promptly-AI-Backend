@@ -5,6 +5,7 @@ import { COLS, findByPk, queryAll, upsert } from '../db/firestoreRepo.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { httpError } from '../utils/http-error.js';
 import { resolveAvatarOnLogin } from '../utils/profile-login.js';
+import { serializeUser } from '../utils/serialize-user.js';
 import {
   applyReferralCode,
   isOAuthSignIn,
@@ -68,7 +69,7 @@ router.post('/auth/login', loginLimiter, async (req, res, next) => {
     }
 
     const user = await findByPk(COLS.users, uid);
-    return res.json({ user, token: parsed.data.idToken, referral });
+    return res.json({ user: serializeUser(user), token: parsed.data.idToken, referral });
   } catch (err) {
     // Token invalid/expired — surface as 401.
     return next(httpError(401, 'Your sign-in has expired. Please sign in again'));
@@ -118,7 +119,7 @@ router.post('/auth/dev/login', loginLimiter, async (req, res, next) => {
     }
 
     const user = await findByPk(COLS.users, id);
-    return res.json({ token: id, user });
+    return res.json({ token: id, user: serializeUser(user) });
   } catch (err) {
     return next(err);
   }

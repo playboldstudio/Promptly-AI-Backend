@@ -180,9 +180,10 @@ Bearer token, **✅+admin** = required token + admin email.
 ### Payments (Google Play Billing)
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/payments/playbilling/verify` | ✅ | Body `{ productId, purchaseToken, isSubscription? }` → verify Play Billing token + grant. `prompt_<id>` unlocks a prompt (buyer pays price + 5% transaction fee, creator credited **gross** to wallet `earnings`). `pro` / `pro_annual` / `creator` / `creator_annual` activate subscriptions (+ ad-free perk). `ad_free` grants one-time ad-free. `deposit_s/m/l/xl` credit a deposit top-up (**net** after gateway fee → `deposits`, fee recycled as `bonus`). |
+| POST | `/payments/playbilling/verify` | ✅ | Body `{ productId, purchaseToken, isSubscription? }` → verify Play Billing token + grant. `pro` / `pro_annual` / `creator` / `creator_annual` activate subscriptions (+ ad-free perk). `ad_free` grants one-time ad-free. `deposit_s/m/l/xl` credit a deposit top-up (**net** after gateway fee → `deposits`, fee recycled as `bonus`). Paid prompt unlocks are **wallet-only** → `POST /payments/wallet/buy`. |
+| POST | `/payments/wallet/buy` | ✅ | **The paid-prompt purchase path** (no gateway). Body `{ itemPriceInr, refId: "prompt_<promptId>" }`. Buyer pays `price × 1.05`; wallet covers the whole total (deposits → earnings up to 100%, bonus up to 10%); author credited gross to `earnings`. `402 + shortfall` → route to Top-up. |
 | POST | `/payments/playbilling/void` | ✅ | Body `{ productId, purchaseToken, isSubscription?, reason? }` → refund/void a purchase. Prompt → creator earnings debit (capped); deposit → net refund from deposits; ad-free → revoke unless sub-perk; subscription → mark voided. |
-| GET | `/payments/wallet` | ✅ | Wallet breakdown: `balances` (earnings / deposits / bonus with amounts + spend rules), `totalBalanceInr`, `bonusVintages` (per-credit remaining + expiry) |
+| GET | `/payments/wallet` | ✅ | Wallet breakdown: `balances` (earnings / deposits / bonus with amounts + spend rules), `totalBalanceInr`, `bonusCredits` (sanitized per-credit bonus — hashed ids, no internal refIds/Play-token derivations) |
 | GET | `/payments/wallet/allocate` | ✅ | **Read-only** payment-source split preview: `?itemPriceInr=N` → per-bucket spend (deposits → earnings → bonus, 10% bonus cap). Builds on `calculatePaymentSplit` |
 | POST | `/payments/wallet/spend` | ✅ | **Spend wallet balances** as payment source. Body `{ itemPriceInr, refId, note? }`; debits the split (deposits → earnings → bonus, 10% cap), returns `totalCovered` + `remaining` residual. **Idempotent by `refId`** |
 | DELETE | `/payments/subscriptions` | ✅ | Cancel active subscription (user also cancels in Play Store) |
@@ -240,7 +241,7 @@ source of truth in `src/db/firestoreRepo.js` (`COLS`).
 | `prompts` | Marketplace prompts: `authorId, title, description, promptText, imageUrl, images[], category, tags, isPaid, priceInr, status, viewCount, saveCount, likeCount, shareCount, reportCount, createdAt`. Moderation: `status` ∈ `published|reported|appealed|deleted`, `reportedAt, reportedBy[], appealStatus, appealReason, appealDeadline, appealedAt` |
 | `prompt_purchases` | One unlock per buyer per prompt. Deterministic id `(buyerId, promptId)`. Freezes `priceInr` (gross) + `buyerPaysInr` (+5% tx fee) + `gatewayFeeInr` (commission, tracked only) |
 | `transactions` | Ledger rows (every credit/debit, `balanceType` = which bucket) — drives `/me/transactions` and the wallet audit trail |
-| `user_wallets` | ★ Multi-balance wallet, id = user id. `earnings` (withdrawable) / `deposits` (own money) / `bonus` (spend-capped + expiring), plus `bonusVintages` map for per-credit FEFO expiry |
+| `user_wallets` | ★ Multi-balance wallet, id = user id. `earnings` (withdrawable) / `deposits` (own money) / `bonus` (spend-capped + expiring), plus `bonusVintages` map for per-credit FEFO expiry. Clients get a sanitized `bonusCredits` array (hashed ids). |
 | `payouts` | Withdrawal requests. Status: `pending / processing / paid / failed` |
 | `saved_prompts` | Join table. Id `(userId, promptId)` |
 | `prompt_reports` | ★ Moderation join table. Id `(userId, promptId)`. `userId, promptId, reason (spam/inappropriate/copyright/misleading/other), description, status (pending/resolved/dismissed), createdAt` |

@@ -3,6 +3,7 @@ import { COLS, findByPk, queryAll, remove, removeMany, upsert, create, getMany, 
 import { derivePromptFlags } from './prompt-metrics.js';
 import { isAdminEmail } from '../config/env.js';
 import { currentActiveSubscriptionWithPlan } from './payments/subscription-utils.js';
+import { PROMPT_CATEGORIES } from '../utils/prompt-import.js';
 
 // promptText is the paid asset and is only revealed to owners/unlockers
 // (see getPromptById). isTrending / isNew are derived, never stored.
@@ -44,10 +45,26 @@ function serializeAuthor(author) {
   };
 }
 
-function toPublicPrompt(json) {
+export function toPublicPrompt(json) {
   const out = {};
   for (const k of PUBLIC_PROMPT_ATTRS) out[k] = json[k];
   out.images = normalizeImages(json);
+  return out;
+}
+
+/**
+ * Whitelisted prompt detail — the widest shape a client gets. Includes the paid
+ * body only when `unlocked` and NEVER exposes moderation internals
+ * (`reportedBy`, `reportCount`, appeal fields) — those live only in the admin
+ * moderation queue.
+ */
+export function toPromptDetail(prompt, { unlocked = false } = {}) {
+  const out = toPublicPrompt(prompt);
+  out.authorId = prompt.authorId ?? null;
+  out.likeCount = Number(prompt.likeCount) || 0;
+  out.shareCount = Number(prompt.shareCount) || 0;
+  out.updatedAt = prompt.updatedAt ?? null;
+  if (unlocked) out.promptText = prompt.promptText;
   return out;
 }
 
@@ -112,6 +129,109 @@ export async function listPrompts({ category, paid, sort, q, viewerId, limit = 5
   return withAuthorsAndSaveState(page, viewerId, limit, offset, filtered.length);
 }
 
+/** Parse `YYYY-MM` (or `YYYY-M`) into an inclusive calendar-month range. */
+function parseMonth(month) {
+  const m = /^(\d{4})-(\d{1,2})$/.exec(String(month ?? ''));
+  if (!m) return null;
+  const year = Number(m[1]);
+  const mon = Number(m[2]);
+  if (mon < 1 || mon > 12) return null;
+  const start = new Date(Date.UTC(year, mon - 1, 1));
+  const end = new Date(Date.UTC(mon === 12 ? year + 1 : year, mon % 12, 1));
+  return { start, end, label: `${year}-${String(mon).padStart(2, '0')}` };
+}
+
+/**
+ * GET /prompts/categories — Flipkart-style category rails.
+ * Reads the published set once, groups in memory, and returns each category
+ * with its exact count plus the newest `previewLimit` prompts (enriched with
+ * author + savedByMe). `paid` narrows the rails to free/paid only.
+ */
+export async function listPromptCategories({ previewLimit = 4, paid, viewerId } = {}) {
+  const safe = Math.max(1, Math.min(10, Number(previewLimit) || 4));
+
+  const { rows } = await queryAll({
+    collection: COLS.prompts,
+    filters: [{ field: 'status', value: 'published' }],
+    orderBy: { field: 'createdAt', direction: 'desc' },
+    limit: PHOTOS_CATALOG_MAX,
+  });
+
+  const groups = new Map();
+  const counts = new Map();
+  let total = 0;
+  for (const r of rows) {
+    if (paid === 'free' && r.isPaid) continue;
+    if (paid === 'paid' && !r.isPaid) continue;
+    total += 1;
+    counts.set(r.category, (counts.get(r.category) ?? 0) + 1);
+    if (!groups.has(r.category)) groups.set(r.category, []);
+    const list = groups.get(r.category);
+    if (list.length < safe) list.push(r);
+  }
+
+  // Enrich all preview rows in a single pass, then map them back to rails.
+  const previewRows = [...groups.values()].flat();
+  const catalog = previewRows.length
+    ? await withAuthorsAndSaveState(previewRows, viewerId, previewRows.length, 0, previewRows.length)
+    : { prompts: [] };
+  const enrichedById = new Map(catalog.prompts.map((p) => [p.id, p]));
+
+  const categories = PROMPT_CATEGORIES.map((category) => ({
+    category,
+    count: counts.get(category) ?? 0,
+    previews: (groups.get(category) ?? [])
+      .map((r) => enrichedById.get(r.id))
+      .filter(Boolean),
+  }));
+
+  return { categories, total };
+}
+
+/**
+ * GET /prompts/new — "just added" feed. Prompts published within the last
+ * `days` (default 7, max 90), newest first. Same row shape as GET /prompts.
+ */
+export async function listNewPrompts({ days = 7, viewerId, limit = 50, offset = 0 } = {}) {
+  const safeDays = Math.max(1, Math.min(90, Number(days) || 7));
+  const since = new Date(Date.now() - safeDays * 24 * 60 * 60 * 1000);
+  const filters = [
+    { field: 'status', value: 'published' },
+    { field: 'createdAt', op: '>=', value: since },
+  ];
+
+  const [page, total] = await Promise.all([
+    queryAll({ collection: COLS.prompts, filters, orderBy: { field: 'createdAt', direction: 'desc' }, limit, offset }),
+    countDocuments(COLS.prompts, filters),
+  ]);
+  const result = await withAuthorsAndSaveState(page.rows, viewerId, limit, offset, total);
+
+  return { ...result, days: safeDays, since: since.toISOString() };
+}
+
+/**
+ * GET /prompts/month — month-wise feed. Prompts published within a calendar
+ * month (`month=YYYY-MM`), newest first. Same row shape as GET /prompts.
+ */
+export async function listMonthPrompts({ month, viewerId, limit = 50, offset = 0 } = {}) {
+  const range = parseMonth(month);
+  if (!range) return { error: { status: 400, message: 'month must be in YYYY-MM format' } };
+
+  const filters = [
+    { field: 'status', value: 'published' },
+    { field: 'createdAt', op: '>=', value: range.start },
+    { field: 'createdAt', op: '<', value: range.end },
+  ];
+
+  const [page, total] = await Promise.all([
+    queryAll({ collection: COLS.prompts, filters, orderBy: { field: 'createdAt', direction: 'desc' }, limit, offset }),
+    countDocuments(COLS.prompts, filters),
+  ]);
+  const result = await withAuthorsAndSaveState(page.rows, viewerId, limit, offset, total);
+
+  return { ...result, month: range.label };
+}
+
 /**
  * Enrich a page of prompt rows with authors, savedByMe and a total.
  * `total` is exact (count aggregation from the pure-feed path, or the
@@ -169,8 +289,7 @@ export async function getPromptById(id, viewerId) {
     savedByMe = Boolean(saved);
   }
 
-  const json = { ...prompt };
-  if (!unlocked) delete json.promptText; // gate the paid prompt body
+  const json = toPromptDetail(prompt, { unlocked });
 
   return {
     ...json,

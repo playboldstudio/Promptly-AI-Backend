@@ -2,6 +2,9 @@ import { Router, raw } from 'express';
 import { z } from 'zod';
 import {
   listPrompts,
+  listPromptCategories,
+  listNewPrompts,
+  listMonthPrompts,
   getPromptById,
   recordPromptView,
   savePrompt,
@@ -135,6 +138,65 @@ router.get('/prompts', optionalAuth, async (req, res, next) => {
       limit,
       offset,
     });
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * GET /prompts/categories — Flipkart-style category rails: every category with
+ * its published count + the newest `previewLimit` prompts (default 4, max 10).
+ * Optional `paid` narrows the rails to "free" | "paid" items.
+ */
+router.get('/prompts/categories', optionalAuth, async (req, res, next) => {
+  try {
+    const { paid } = req.query;
+    const result = await listPromptCategories({
+      previewLimit: req.query.previewLimit,
+      paid,
+      viewerId: req.userId,
+    });
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * GET /prompts/new — "just added" feed: prompts published within the last
+ * `days` (default 7, max 90), newest first. Same row shape as GET /prompts.
+ */
+router.get('/prompts/new', optionalAuth, async (req, res, next) => {
+  try {
+    const { limit, offset } = parsePaging(req.query);
+    const result = await listNewPrompts({
+      days: req.query.days,
+      viewerId: req.userId,
+      limit,
+      offset,
+    });
+    if (result.error) return next(httpError(result.error.status, result.error.message));
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * GET /prompts/month — month-wise feed: prompts published within a calendar
+ * month (`month=YYYY-MM`), newest first. Same row shape as GET /prompts.
+ */
+router.get('/prompts/month', optionalAuth, async (req, res, next) => {
+  try {
+    const { limit, offset } = parsePaging(req.query);
+    const result = await listMonthPrompts({
+      month: req.query.month,
+      viewerId: req.userId,
+      limit,
+      offset,
+    });
+    if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json(result);
   } catch (err) {
     return next(err);
