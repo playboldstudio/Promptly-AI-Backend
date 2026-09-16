@@ -142,33 +142,6 @@ function parseMonth(month) {
 }
 
 /**
- * Time-window feed ("new"/"month"). Reads the bounded published catalog and
- * filters createdAt in memory for an exact total — Firestore's `count()`
- * aggregation needs a composite index for range filters that isn't deployed,
- * so we follow the same bounded-catalog pattern the semantic list path uses.
- * Rows come back in createdAt-desc order (the catalog query is ordered).
- */
-async function listInTimeWindow({ range, viewerId, limit, offset }) {
-  const { rows } = await queryAll({
-    collection: COLS.prompts,
-    filters: [{ field: 'status', value: 'published' }],
-    orderBy: { field: 'createdAt', direction: 'desc' },
-    limit: PHOTOS_CATALOG_MAX,
-  });
-
-  const filtered = rows.filter((r) => {
-    const t = r.createdAt ? new Date(r.createdAt) : null;
-    if (!t) return false;
-    if (t < range.start) return false;
-    if (range.end && t >= range.end) return false;
-    return true;
-  });
-
-  const page = filtered.slice(offset, offset + limit);
-  return withAuthorsAndSaveState(page, viewerId, limit, offset, filtered.length);
-}
-
-/**
  * GET /prompts/categories — Flipkart-style category rails.
  * Reads the published set once, groups in memory, and returns each category
  * with its exact count plus the newest `previewLimit` prompts (enriched with
@@ -222,7 +195,16 @@ export async function listPromptCategories({ previewLimit = 4, paid, viewerId } 
 export async function listNewPrompts({ days = 7, viewerId, limit = 50, offset = 0 } = {}) {
   const safeDays = Math.max(1, Math.min(90, Number(days) || 7));
   const since = new Date(Date.now() - safeDays * 24 * 60 * 60 * 1000);
-  const result = await listInTimeWindow({ range: { start: since }, viewerId, limit, offset });
+  const filters = [
+    { field: 'status', value: 'published' },
+    { field: 'createdAt', op: '>=', value: since },
+  ];
+
+  const [page, total] = await Promise.all([
+    queryAll({ collection: COLS.prompts, filters, orderBy: { field: 'createdAt', direction: 'desc' }, limit, offset }),
+    countDocuments(COLS.prompts, filters),
+  ]);
+  const result = await withAuthorsAndSaveState(page.rows, viewerId, limit, offset, total);
 
   return { ...result, days: safeDays, since: since.toISOString() };
 }
@@ -235,7 +217,17 @@ export async function listMonthPrompts({ month, viewerId, limit = 50, offset = 0
   const range = parseMonth(month);
   if (!range) return { error: { status: 400, message: 'month must be in YYYY-MM format' } };
 
-  const result = await listInTimeWindow({ range, viewerId, limit, offset });
+  const filters = [
+    { field: 'status', value: 'published' },
+    { field: 'createdAt', op: '>=', value: range.start },
+    { field: 'createdAt', op: '<', value: range.end },
+  ];
+
+  const [page, total] = await Promise.all([
+    queryAll({ collection: COLS.prompts, filters, orderBy: { field: 'createdAt', direction: 'desc' }, limit, offset }),
+    countDocuments(COLS.prompts, filters),
+  ]);
+  const result = await withAuthorsAndSaveState(page.rows, viewerId, limit, offset, total);
 
   return { ...result, month: range.label };
 }
