@@ -134,9 +134,10 @@ RTDN topic pointing at `https://<cloud-run-url>/webhooks/google/rtdn`.
 | POST | `/me/notifications/read` | ✅ | Mark my notifications read. Body `{ ids: string[] }` — only the caller's own rows are touched. |
 | GET | `/me/earnings` | ✅ | Creator earnings summary (lifetime, withdrawn, pending, balance) |
 | GET | `/me/earnings/prompts` | ✅ | Per-prompt earnings breakdown |
-| POST | `/payments/playbilling/verify` | ✅ | Verify a Play Billing purchase token + grant. Body `{ productId, purchaseToken, isSubscription? }`. `prompt_<id>` → paid prompt unlock (buyer pays price + 5% transaction fee; creator credited **gross** to wallet `earnings`). `pro`/`pro_annual`/`creator`/`creator_annual` → activate subscription (+ ad-free perk). `ad_free` → one-time ad-free. `deposit_s/m/l/xl` → deposit top-up (net after gateway fee → `deposits`, fee recycled as `bonus`). |
+| POST | `/payments/playbilling/verify` | ✅ | Verify a Play Billing purchase token + grant. Body `{ productId, purchaseToken, isSubscription? }`. `pro`/`pro_annual`/`creator`/`creator_annual` → activate subscription (+ ad-free perk). `ad_free` → one-time ad-free. `deposit_s/m/l/xl` → deposit top-up (net after gateway fee → `deposits`, fee recycled as `bonus`). Paid prompt unlocks (`prompt_*`) are **wallet-only** → `POST /payments/wallet/buy`. |
+| POST | `/payments/wallet/buy` | ✅ | **The paid-prompt purchase path** (no gateway). Body `{ itemPriceInr, refId: "prompt_<promptId>" }`. Buyer pays `price × 1.05`; wallet covers the full total (deposits → earnings up to 100%, bonus up to 10%); creator credited gross to `earnings`. `402 + shortfall` → route to Top-up. |
 | POST | `/payments/playbilling/void` | ✅ | Refund/void a purchase. Body `{ productId, purchaseToken, isSubscription?, reason? }`. Reverses grant: prompt → creator earnings debit; deposit → net refund from deposits; ad-free → revoke (unless sub-perk); subscription → mark voided. |
-| GET | `/payments/wallet` | ✅ | Wallet breakdown: `balances` (earnings / deposits / bonus with amounts + spend rules), `totalBalanceInr`, `bonusVintages` |
+| GET | `/payments/wallet` | ✅ | Wallet breakdown: `balances` (earnings / deposits / bonus with amounts + spend rules), `totalBalanceInr`, `bonusCredits` (sanitized per-credit bonus: opaque ids, no internal refIds/token derivations) |
 | GET | `/payments/wallet/allocate` | ✅ | **Read-only** payment-source split for an item price: `?itemPriceInr=99` → how much comes from each wallet bucket (deposits → earnings → bonus, 10% bonus cap). |
 | POST | `/payments/wallet/spend` | ✅ | **Spend wallet balances** as a payment source toward an item. Body `{ itemPriceInr, refId, note? }`. Debits exactly the wallet split (deposits → earnings → bonus, 10% cap); returns `totalCovered` + `remaining` (the residual paid via Play Billing). **Idempotent by `refId`** — replays return the same result, no double-debit. |
 | POST | `/payments/payouts` | ✅ | Request a withdrawal (**manual settle**, min ₹60). Body `{ amountInr }`. Requires saved bank details; deducts only the withdrawal fee (15% Pro / 5% Creator), reserves the balance as `pending`. |
@@ -231,7 +232,7 @@ reverses the reservation.
 - All money is stored as **integer rupees** (never floats) at paise precision.
 - `prompt_purchases` freezes `priceInr / buyerPaysInr / transactionFeeInr / platformFeePercent / netInr` at sale time.
 - Every credit/debit writes one row to `transactions` with a `balanceType` (earnings/deposits/bonus — My Account ledger + wallet audit).
-- The wallet doc's `bonus` scalar ≡ Σ `bonusVintages[].remaining`. Bonus spends oldest-expiring first (FEFO) up to 10% of an item price.
+- The wallet doc's `bonus` scalar ≡ Σ `bonusVintages[].remaining`. Bonus spends oldest-expiring first (FEFO) up to 10% of an item price. Clients see the vintage breakdown as `bonusCredits` with hashed ids.
 - Payouts reserve the wallet `earnings` balance *at request time* — `pending` money can't be double-withdrawn.
 - RTDN handlers are idempotent: a unique `dedupe_key` (hash of event + payload) makes
   replays no-ops, so a doubled delivery can't double-charge a subscription.

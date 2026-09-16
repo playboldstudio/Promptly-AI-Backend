@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import {
   COLS,
   findByPk,
@@ -40,6 +41,15 @@ function toMoney(value) {
   return Math.round(value * 100) / 100;
 }
 
+/**
+ * Opaque id for a bonus credit exposed to clients. The internal `creditId` is a
+ * purchase-row id / refId / Play-token derivation — never send it to clients.
+ * The hash is deterministic per credit but not reversible.
+ */
+function opaqueId(creditId) {
+  return crypto.createHash('sha256').update(String(creditId)).digest('hex').slice(0, 16);
+}
+
 /** Read the numeric amount of a balance bucket (0 when doc/bucket missing). */
 function bucketAmount(wallet, balanceType) {
   return Number(wallet?.[balanceType] ?? 0);
@@ -66,6 +76,10 @@ function bonusExpiryFor(days) {
 /**
  * Read a user's wallet. Missing wallets are lazily materialized as an all-zero
  * shape (never created as a phantom row in a read path).
+ *
+ * `bonusCredits` is the SANITIZED per-credit bonus breakdown — the internal
+ * vintage ids (purchase-row ids / refIds) are hashed to opaque ids, so a wallet
+ * read never leaks internal identifiers or Play-token substrings.
  */
 export async function getWallet(userId) {
   const doc = await findByPk(COLS.userWallets, userId);
@@ -79,11 +93,19 @@ export async function getWallet(userId) {
     total = toMoney(total + amount);
   }
 
+  const bonusCredits = Object.entries(doc?.bonusVintages ?? {})
+    .filter(([, v]) => toMoney(v?.remaining ?? 0) > 0)
+    .map(([id, v]) => ({
+      id: opaqueId(id),
+      amountInr: toMoney(v.remaining ?? 0),
+      expiresAt: v.expiresAt,
+    }));
+
   return {
     userId,
     balances,
     totalBalanceInr: total,
-    bonusVintages: doc?.bonusVintages ?? {},
+    bonusCredits,
   };
 }
 
@@ -516,13 +538,13 @@ export async function expireBonusVintages({ now = Date.now() } = {}) {
  * to push a "your ₹X bonus expires soon" notification.
  */
 export async function getBonusExpiringSoon(userId, { withinDays = 7 } = {}) {
-  const wallet = await getWallet(userId);
-  const upcoming = Object.entries(wallet.bonusVintages ?? {})
+  const doc = await findByPk(COLS.userWallets, userId);
+  const upcoming = Object.entries(doc?.bonusVintages ?? {})
     .filter(([, v]) => {
       const msLeft = new Date(v.expiresAt).getTime() - Date.now();
       return msLeft > 0 && msLeft <= withinDays * MS_PER_DAY;
     })
-    .map(([id, v]) => ({ id, amount: toMoney(v.remaining ?? 0), expiresAt: v.expiresAt }));
+    .map(([id, v]) => ({ id: opaqueId(id), amount: toMoney(v.remaining ?? 0), expiresAt: v.expiresAt }));
   return { expiring: upcoming };
 }
 
@@ -695,8 +717,8 @@ export async function spendFromWallet({ userId, itemPriceInr, refId, note }) {
 
 /**
  * Buy a paid prompt's unlock entirely from the user's wallet — the pure-wallet
- * counterpart to Play Billing's `grantPromptUnlock`. Mirrors its fee: the buyer
- * pays `price × 1.05` (5% transaction fee), and the wallet covers the WHOLE
+ * purchase path for paid prompts (no Play Billing gateway). The buyer pays
+ * `price × 1.05` (5% transaction fee), and the wallet covers the WHOLE
  * amount in ONE transaction (no second payment):
  *
  *   1. debits the wallet each split bucket (deposits → earnings → bonus,
@@ -757,9 +779,9 @@ export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refI
     return { error: { status: 400, message: 'Price mismatch — refresh and try again' } };
   }
 
-  // Mirror grantPromptUnlock's fee: wallet prompt buys carry a 5% transaction
-  // fee on top of the prompt price (price × 1.05). The wallet covers the WHOLE
-  // amount — price + fee — so the buyer never sees a second payment.
+  // Wallet prompt buys carry a 5% transaction fee on top of the prompt price
+  // (price × 1.05). The wallet covers the WHOLE amount — price + fee — so the
+  // buyer never sees a second payment.
   const buyerPaysInr = toMoney(priceInr * 1.05);
   const transactionFeeInr = toMoney(buyerPaysInr - priceInr);
 

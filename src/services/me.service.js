@@ -7,10 +7,19 @@ import {
   removeMany,
   countDocuments,
 } from '../db/firestoreRepo.js';
+import crypto from 'node:crypto';
 import { firebaseAuth } from '../db/firestore.js';
 import { currentActiveSubscriptionWithPlan, hasAdFreeAccess } from './payments/subscription-utils.js';
 import { cancelActiveSubscription } from './payments/subscriptions.service.js';
 import { isAdminEmail } from '../config/env.js';
+import { toPublicPrompt, toPromptDetail } from './prompts.service.js';
+import { derivePromptFlags } from './prompt-metrics.js';
+import { serializeSubscription } from '../utils/serialize-user.js';
+
+/** Opaque hash for exposing an internal doc/row id (never raw purchase-row ids). */
+function opaqueId(id) {
+  return crypto.createHash('sha256').update(String(id)).digest('hex').slice(0, 16);
+}
 
 export async function getProfile(userId) {
   const [subscription, kyc, adFree] = await Promise.all([
@@ -20,14 +29,17 @@ export async function getProfile(userId) {
   ]);
 
   return {
-    subscription: subscription
-      ? { ...subscription }
-      : null,
+    subscription: serializeSubscription(subscription),
     kycStatus: kyc?.status ?? 'not_submitted',
     adFree,
   };
 }
 
+/**
+ * The creator's own prompts, newest first. Whitelisted card shape — includes
+ * the prompt body (it's the author's asset) and their OWN moderation state
+ * (status / reportCount), but never `reportedBy` or other reporters' details.
+ */
 export async function getMyPrompts(userId, { limit = 50, offset = 0 } = {}) {
   const [page, total] = await Promise.all([
     queryAll({
@@ -39,7 +51,15 @@ export async function getMyPrompts(userId, { limit = 50, offset = 0 } = {}) {
     }),
     countDocuments(COLS.prompts, [{ field: 'authorId', value: userId }]),
   ]);
-  const prompts = page.rows;
+  const prompts = page.rows.map((row) => ({
+    ...toPublicPrompt(row),
+    promptText: row.promptText,
+    status: row.status ?? 'published',
+    likeCount: Number(row.likeCount) || 0,
+    shareCount: Number(row.shareCount) || 0,
+    reportCount: Number(row.reportCount) || 0,
+    ...derivePromptFlags(row),
+  }));
   return { prompts, total: total ?? prompts.length };
 }
 
@@ -74,22 +94,20 @@ export async function getSavedPrompts(userId, { limit = 50, offset = 0 } = {}) {
 
   const saved = rows.map((row) => {
     const prompt = prompts[row.promptId];
-    const json = prompt ? { ...prompt } : {};
     const unlocked =
       isAdmin ||
       !prompt ||
-      !json.isPaid ||
-      (json.authorId && json.authorId === userId) ||
-      unlockedIds.has(json.id);
-    if (!unlocked) delete json.promptText;
+      !prompt?.isPaid ||
+      (prompt?.authorId && prompt.authorId === userId) ||
+      unlockedIds.has(prompt?.id);
     return {
-      ...row,
-      prompt: {
-        ...json,
-        images: Array.isArray(json.images) && json.images.length ? json.images : json.imageUrl ? [json.imageUrl] : [],
+      savedAt: row.savedAt,
+      prompt: prompt ? {
+        ...toPromptDetail(prompt, { unlocked }),
+        ...derivePromptFlags(prompt),
         savedByMe: true,
         unlocked,
-      },
+      } : null,
     };
   });
 
@@ -122,7 +140,12 @@ export async function getPurchasedPrompts(userId, { limit = 50, offset = 0 } = {
         purchasedAt: row.createdAt,
         priceInr: Number(row.priceInr) || 0,
         // The buyer owns the prompt — always return the full unlocked body.
-        prompt: prompt ? { ...prompt, unlocked: true, savedByMe: false } : null,
+        prompt: prompt ? {
+          ...toPromptDetail(prompt, { unlocked: true }),
+          ...derivePromptFlags(prompt),
+          savedByMe: false,
+          unlocked: true,
+        } : null,
       };
     });
 
@@ -154,7 +177,7 @@ export async function getTopUpHistory(userId, { limit = 100, offset = 0 } = {}) 
 
   return {
     topups: rows.map((r) => ({
-      id: r.id,
+      id: opaqueId(r.id), // never the raw `{userId}_{productId}_<tokenSuffix>` purchase-row id
       productId: r.promptId,
       priceInr: Number(r.priceInr) || 0,
       gatewayFeeInr: Number(r.gatewayFeeInr) || 0,
@@ -167,6 +190,11 @@ export async function getTopUpHistory(userId, { limit = 100, offset = 0 } = {}) 
   };
 }
 
+/**
+ * The user's ledger, newest first. Returns a trimmed history row — the UI never
+ * needs internal settlement fields (`refId`, `gateway*`, `userId`) nor the
+ * internal id tokens they sometimes carry.
+ */
 export async function getTransactions(userId, { limit = 50, offset = 0 } = {}) {
   const [page, total] = await Promise.all([
     queryAll({
@@ -178,7 +206,16 @@ export async function getTransactions(userId, { limit = 50, offset = 0 } = {}) {
     }),
     countDocuments(COLS.transactions, [{ field: 'userId', value: userId }]),
   ]);
-  const transactions = page.rows;
+  const transactions = page.rows.map((r) => ({
+    id: r.id,
+    type: r.type,
+    direction: r.direction,
+    amountInr: Number(r.amountInr) || 0,
+    balanceType: r.balanceType,
+    balanceAfterInr: Number(r.balanceAfterInr) ?? null,
+    note: r.note ?? null,
+    createdAt: r.createdAt,
+  }));
   return { transactions, total: total ?? transactions.length };
 }
 

@@ -113,11 +113,14 @@ wallet math works.
 > ids goes in `.env` — they don't vary by environment (dev + prod share the same
 > package).
 
-**Paid-prompt unlocks (`prompt_<id>`):** single-prompt purchases use a **dynamic**
-`productId` = `prompt_<promptId>` (e.g. `prompt_9f3c2a`). This is not a fixed
-Play Console SKU; create a **one-time product per paid prompt** in Play Console
-with that id string, and have the app send it. (Not in the list above because it's
-per-content, not static.)
+**Paid-prompt unlocks (`prompt_<id>`):** paid prompts are **wallet-only** — no
+Play Console SKU and no Play Billing `verify` call. The app shows the wallet
+split via `GET /payments/wallet/allocate?itemPriceInr=<prompt.priceInr>`, then
+calls `POST /payments/wallet/buy` with body
+`{ itemPriceInr: <prompt.priceInr>, refId: "prompt_<promptId>" }`. The wallet
+covers the full total (**deposits → earnings up to 100%, then bonus up to 10%**
+of the price + 5% transaction fee). On `402 { error, shortfall }` the UI routes
+to a deposit Top-up. `playbilling/verify` rejects `prompt_*` product ids.
 
 **RTDN Pub/Sub** (optional, for real-time revocations) → push to
 `POST /webhooks/google/rtdn`, subscription id in `RTDN_SUBSCRIPTION`. Not
@@ -133,7 +136,7 @@ All require the Firebase ID token (Bearer). All under `{base}/payments`.
 | `POST /playbilling/verify` | `{ productId, purchaseToken, isSubscription?:bool }` — **productId = the Play Console ID from §4** | Subscription: `{ verified:true, subscription:{ planId, planName, priceInr, billingCycle, perks, subscriptionId, currentPeriodEnd } }`. One-time (ad-free/deposit): `{ verified:true, productId, priceInr, gatewayFeeInr, netDeposit?, adFree? }` | Dispatches by productId; grants entitlement + wallet credit atomically. Send the **real** console id — the backend maps it (§4 table). |
 | `POST /playbilling/void` | `{ productId, purchaseToken, isSubscription?:bool, reason? }` | `{ success:true, type, … }` | Void/refund. For subscriptions `isSubscription:true`. |
 | `DELETE /subscriptions` | — | `{ success, subscriptionId, planId, note }` | Marks local sub cancelled (user still cancels in Play Store). |
-| `GET /wallet` | — | `{ balances:{ earnings, deposits, bonus }, bonusVintages, … }` | Multi-balance wallet breakdown. |
+| `GET /wallet` | — | `{ balances:{ earnings, deposits, bonus }, bonusCredits:[{id,amountInr,expiresAt}], … }` | Multi-balance wallet breakdown. `bonusCredits` ids are opaque hashes (never internal refIds / token derivations). |
 | `GET /wallet/allocate?itemPriceInr=99` | — | `{ split:[{balanceType,amountToUse}], totalCovered, remaining, wallet }` | Read-only preview of the payment split before a real purchase. |
 | `POST /wallet/spend` | `{ itemPriceInr, refId, note? }` | `{ success, totalCovered, remaining, wallet, split }` | Debit wallet as partial payment; `refId` idempotency. |
 | `GET /payouts/eligibility` | — | `{ withdrawableBalance, minWithdrawalInr, eligible, blockers }` | Creator withdrawal rules. |
@@ -150,10 +153,10 @@ All require the Firebase ID token (Bearer). All under `{base}/me`.
 
 | Endpoint | Response | Notes |
 |---|---|---|
-| `GET /me/purchases?limit=&offset=` | `{ purchases: [{ purchaseId, purchasedAt, priceInr, prompt }], total }` | **Only real prompt unlocks** — deposit top-ups and ad-free purchases are excluded. `prompt` is the full prompt object unlocked for the owner. |
-| `GET /me/topups?limit=&offset=` | `{ topups: [{ id, productId, priceInr, gatewayFeeInr, netDepositInr, bonusCreditInr, status, createdAt }], total }` | Deposit history (one row per pack bought). `netDepositInr = price − gatewayFee`; `bonusCreditInr = gatewayFee` (recycled as bonus). |
-| `GET /me/transactions?limit=&offset=` | `{ transactions: [...], total }` | The full ledger — every credit/debit (deposit, referral bonus, wallet spend, prompt sale payout, void…). |
-| `GET /me/earnings` | `{ earnings }` | Creator side — totalEarnings, salesCount, withdrawn, balance. |
+| `GET /me/purchases?limit=&offset=` | `{ purchases: [{ purchaseId, purchasedAt, priceInr, prompt }], total }` | **Only real prompt unlocks** — deposit top-ups and ad-free purchases are excluded. `prompt` is the whitelisted detail shape, unlocked for the owner. |
+| `GET /me/topups?limit=&offset=` | `{ topups: [{ id, productId, priceInr, gatewayFeeInr, netDepositInr, bonusCreditInr, status, createdAt }], total }` | Deposit history (one row per pack bought). `netDepositInr = price − gatewayFee`; `bonusCreditInr = gatewayFee` (recycled as bonus). `id` is hashed (raw purchase-row ids embed the Play token suffix). |
+| `GET /me/transactions?limit=&offset=` | `{ transactions: [{ id, type, direction, amountInr, balanceType, balanceAfterInr, note, createdAt }], total }` | Trimmed ledger — every credit/debit. Internal `refId`/`gateway*` settlement fields are not exposed. |
+| `GET /me/earnings` | `{ earnings }` | Creator side — totalEarnings, salesCount, withdrawn, balance, eligibility. (Wallet buckets come from `GET /payments/wallet`.) |
 
 Add both `/me/purchases` (my purchased prompts) and `/me/topups` (my deposit
 history) to the app's history/profile screens. `/me/transactions` is the

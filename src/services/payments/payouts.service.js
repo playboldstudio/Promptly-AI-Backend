@@ -257,7 +257,9 @@ export async function requestPayout({ userId, amountInr }) {
 }
 
 /**
- * A user's own payout history (id, amount, status, dates, failure reason).
+ * A user's own payout history (id, amounts, status, dates, failure reason).
+ * Bank snapshot is deliberately excluded — details live on `GET /me/bank` and
+ * this list would otherwise echo PII in every row.
  */
 export async function listUserPayouts(userId, { limit = 50, offset = 0 } = {}) {
   const { rows } = await queryAll({
@@ -267,11 +269,23 @@ export async function listUserPayouts(userId, { limit = 50, offset = 0 } = {}) {
     limit: Math.min(limit, 100),
     offset: Math.max(offset, 0),
   });
-  return { payouts: rows, total: rows.length };
+  const payouts = rows.map((p) => ({
+    id: p.id,
+    amountInr: Number(p.amountInr) || 0,
+    status: p.status,
+    feeInr: Number(p.feeInr) || 0,
+    netInr: Number(p.netInr) || 0,
+    processedAt: p.processedAt ?? null,
+    failureReason: p.failureReason ?? null,
+    createdAt: p.createdAt,
+  }));
+  return { payouts, total: payouts.length };
 }
 
 /**
  * Admin — list payout requests with the transfer details the admin needs.
+ * The bank-transfer values come from the embedded live user only (single PII
+ * copy); the payout-row snapshot fields are dropped rather than duplicated.
  */
 export async function listPayouts({ status, limit = 50, offset = 0 } = {}) {
   const filters = [];
@@ -294,7 +308,16 @@ export async function listPayouts({ status, limit = 50, offset = 0 } = {}) {
   const payouts = rows.map((p) => {
     const user = users[p.userId];
     return {
-      ...p,
+      id: p.id,
+      userId: p.userId,
+      amountInr: Number(p.amountInr) || 0,
+      status: p.status,
+      platformFeeInr: Number(p.platformFeeInr) || 0,
+      feeInr: Number(p.feeInr) || 0,
+      netInr: Number(p.netInr) || 0,
+      processedAt: p.processedAt ?? null,
+      failureReason: p.failureReason ?? null,
+      createdAt: p.createdAt,
       user: user
         ? {
             id: user.id,
@@ -313,7 +336,7 @@ export async function listPayouts({ status, limit = 50, offset = 0 } = {}) {
     };
   });
 
-  return { payouts, total: rows.length };
+  return { payouts, total: payouts.length };
 }
 
 /**

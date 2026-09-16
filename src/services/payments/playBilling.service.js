@@ -1,11 +1,9 @@
 import { COLS, findByPk, inTxGet, inTxSet } from '../../db/firestoreRepo.js';
 import { runTransaction } from '../../db/config.js';
 import { verifyOneTimePurchase, acknowledgePurchaseWithRetry, consumePurchase, calculatePlayBillingFee, safeVerify } from '../../lib/playBilling.js';
-import { writeLedger } from '../ledger.js';
 import { isAdminEmail } from '../../config/env.js';
 import { getOneTimeProduct } from './products.js';
 import { playConsoleProductId } from './playConsoleIds.js';
-import { currentActiveSubscriptionWithPlan } from './subscription-utils.js';
 import { creditDepositTopUpTx } from '../wallet.service.js';
 import { notify } from '../notify.js';
 
@@ -16,10 +14,6 @@ function toMoney(value) {
 
 function err(status, message) {
   return { error: { status, message } };
-}
-
-function purchaseIdFor(buyerId, promptId) {
-  return `${buyerId}_${promptId}`;
 }
 
 /**
@@ -39,184 +33,6 @@ function tokenSuffix(token) {
  */
 export function depositRowIdFor(userId, productId, purchaseToken) {
   return `${userId}_${productId}_${tokenSuffix(purchaseToken)}`;
-}
-
-/**
- * Grant a paid prompt unlock from a verified Play Billing one-time purchase
- * token (product `prompt_<id>`).
- *
- * Money model (see plans/pricing.md + plans/withdrawals.md):
- *  - Buyer pays price + 5% transaction fee (app income — not credited anywhere)
- *  - Creator's `earnings` is credited the FULL gross price at sale
- *  - Play Billing's ~15% commission is stored as gatewayFeeInr for
- *    reconciliation only — it is NEVER deducted at withdrawal
- *  - The 15%/5% withdrawal fee is applied later, when the creator initiates a
- *    payout (payouts.service.js)
- */
-export async function grantPromptUnlock({ buyerId, productId, purchaseToken }) {
-  if (!productId || !productId.startsWith('prompt_')) {
-    return err(400, 'Unknown product');
-  }
-  const promptId = productId.slice('prompt_'.length);
-  const prompt = await findByPk(COLS.prompts, promptId);
-  if (!prompt || prompt.status !== 'published') {
-    return err(404, 'Prompt not found');
-  }
-  if (!prompt.isPaid || !prompt.priceInr) {
-    return err(400, 'This prompt is free — nothing to pay');
-  }
-
-  // Admins have full access to every prompt — they never pay.
-  const buyer = await findByPk(COLS.users, buyerId);
-  if (buyer && isAdminEmail(buyer.email)) {
-    return err(409, 'You have full admin access — this prompt is already unlocked');
-  }
-
-  // One unlock per buyer per prompt — reject if already purchased.
-  const purchaseId = purchaseIdFor(buyerId, promptId);
-  const existing = await findByPk(COLS.promptPurchases, purchaseId);
-  if (existing) {
-    return err(409, 'You already own this prompt');
-  }
-
-  // Verify the purchase token with Google BEFORE granting (never trust the client).
-  const { data: purchase, error: verifyErr } = await safeVerify(() =>
-    verifyOneTimePurchase({ productId, purchaseToken }),
-  );
-  if (verifyErr) return err(verifyErr.status, verifyErr.message);
-  if (!purchase || Number(purchase.purchaseState) !== 0) {
-    return err(400, 'Purchase not completed');
-  }
-
-  const priceInr = Number(prompt.priceInr);
-  const buyerPaysInr = toMoney(priceInr * 1.05);            // + 5% transaction fee
-  const transactionFeeInr = toMoney(buyerPaysInr - priceInr);
-  const gateway = calculatePlayBillingFee({ salePriceInr: priceInr });
-
-  try {
-    // Snapshot the seller's withdrawal-fee (platform) percent so the purchase
-    // row is self-contained for reconciliation. Derives from the seller's active
-    // plan (Pro 15% / Creator 5%); defaults to the Creator rate when no plan.
-    const authorSub = await currentActiveSubscriptionWithPlan(prompt.authorId);
-    const authorFeePercent = authorSub?.plan?.platformFeePercent ?? 5;
-    // The fee-in-total snapshot shown on the purchase row (gross net after the
-    // seller's platform fee — informational; the fee is truly applied at payout).
-    const netInr = toMoney(priceInr - toMoney((priceInr * authorFeePercent) / 100));
-
-    await runTransaction(async (tx) => {
-      const already = await inTxGet(tx, COLS.promptPurchases, purchaseId);
-      if (already) throw Object.assign(new Error('already-owns'), { alreadyOwns: true });
-
-      // Pre-read the buyer's balance BEFORE any write. Firestore transactions
-      // cannot read after a write; writeLedger writes the user_balances doc.
-      const buyerBalance = await inTxGet(tx, COLS.userBalances, buyerId);
-      const buyerPrev = Number(buyerBalance?.balanceInr ?? 0);
-
-      // The purchase row (deterministic id guarantees one-per-buyer-per-prompt).
-      inTxSet(tx, COLS.promptPurchases, purchaseId, {
-        buyerId,
-        promptId,
-        authorId: prompt.authorId ?? null,
-        priceInr,
-        buyerPaysInr,
-        transactionFeeInr,
-        platformFeePercent: authorFeePercent,
-        netInr,
-        gateway: 'play_billing',
-        gatewayOrderToken: purchaseToken,
-        gatewayFeeInr: gateway.feeInr,
-        gatewayFeePercent: gateway.feePercent,
-        gatewayFeeSource: 'calculated',
-        status: 'completed',
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-
-      // Creator earnings are a wallet balance (Phase 2) — credit the FULL gross
-      // price to the seller's `earnings`. The withdrawal fee (15%/5%) is applied
-      // at payout, never here, and the Play Billing commission was absorbed by
-      // the platform at payment time (tracked on the row for reconciliation).
-      if (prompt.authorId) {
-        const authorWallet = (await inTxGet(tx, COLS.userWallets, prompt.authorId)) ?? {
-          earnings: 0,
-          deposits: 0,
-          bonus: 0,
-          bonusVintages: {},
-        };
-        const newEarnings = toMoney(Number(authorWallet.earnings ?? 0) + priceInr);
-        inTxSet(tx, COLS.userWallets, prompt.authorId, {
-          earnings: newEarnings,
-          updatedAt: new Date(),
-        });
-        inTxAdd(tx, COLS.transactions, {
-          userId: prompt.authorId,
-          type: 'paid_prompt_sale',
-          direction: 'credit',
-          amountInr: priceInr,
-          balanceType: 'earnings',
-          balanceAfterInr: newEarnings,
-          refId: purchaseId,
-          note: `Sale of "${prompt.title}" — gross ${priceInr} (withdrawal fee at payout)`,
-          gateway: 'play_billing',
-          gatewayFeeInr: gateway.feeInr,
-          platformFeeInr: 0,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        });
-      }
-
-      // Ledger — debit the buyer by the full amount paid (gross + 5% fee).
-      await writeLedger(
-        tx,
-        {
-          userId: buyerId,
-          type: 'paid_prompt_sale',
-          direction: 'debit',
-          amountInr: buyerPaysInr,
-          refId: purchaseId,
-          note: `Unlocked "${prompt.title}"`,
-          balanceInr: buyerPrev,
-        },
-      );
-    });
-
-    // Acknowledge AFTER a successful grant (retries, never silent-loss).
-    await acknowledgePurchaseWithRetry({ productId, purchaseToken, isSubscription: false }).catch(() => {});
-
-    // Inbox notifications (best-effort, never fails a completed purchase).
-    notify({
-      userId: buyerId,
-      type: 'prompt_unlocked',
-      title: 'Prompt unlocked',
-      body: `You unlocked "${prompt.title}"`,
-      refId: purchaseId,
-      dedupeKey: purchaseId,
-    });
-    if (prompt.authorId) {
-      notify({
-        userId: prompt.authorId,
-        type: 'paid_prompt_sale',
-        title: 'Someone purchased your prompt',
-        body: `"${prompt.title}" was unlocked — +₹${priceInr} in earnings`,
-        refId: purchaseId,
-        dedupeKey: purchaseId,
-        data: { buyerId, priceInr },
-      });
-    }
-
-    return {
-      success: true,
-      unlocked: true,
-      promptId,
-      purchaseId,
-      buyerPaysInr,
-      transactionFeeInr,
-    };
-  } catch (err) {
-    if (err.alreadyOwns) return err(409, 'You already own this prompt');
-    if (/ABORTED|already exists/i.test(err.message)) return err(409, 'You already own this prompt');
-    throw err;
-  }
 }
 
 /* ── Ad-free (one-time, non-consumable) ──────────────────────────────────── */

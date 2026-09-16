@@ -73,6 +73,5 @@ export async function getEarningsSummary(authorId) {
     withdrawalEligible: elig.eligible,
     withdrawalBlockers: elig.blockers,
     currency: elig.currency,
-    wallet: wallet.balances, // full breakdown for the account screen
   };
 }

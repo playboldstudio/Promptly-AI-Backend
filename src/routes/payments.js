@@ -10,7 +10,7 @@ import {
   markPayoutPaid,
   markPayoutFailed,
 } from '../services/payments/payouts.service.js';
-import { grantPromptUnlock, grantAdFree, handleDepositTopUp } from '../services/payments/playBilling.service.js';
+import { grantAdFree, handleDepositTopUp } from '../services/payments/playBilling.service.js';
 import { voidOneTimePurchase, voidSubscriptionPurchase } from '../services/payments/void.service.js';
 import { activateSubscriptionFromToken, cancelActiveSubscription } from '../services/payments/subscriptions.service.js';
 import { isDepositProduct, isAdFreeProduct } from '../services/payments/products.js';
@@ -67,10 +67,11 @@ const playBillingVoidSchema = z.object({
 /**
  * POST /payments/playbilling/verify — verify a Play Billing purchase token and
  * grant the entitlement. Dispatches by productId:
- *   - prompt_<id>        → unlock prompt (buyer pays price + 5% tx fee; creator credited gross)
  *   - pro / pro_annual / creator / creator_annual (isSubscription: true) → activate subscription + perks
  *   - ad_free            → one-time ad-free purchase (non-consumable)
  *   - deposit_*          → deposit top-up (consumable, fee recycled as bonus)
+ *   - prompt_<id>        → NOT supported here — paid prompts are bought wallet-only
+ *                         via POST /payments/wallet/buy
  */
 router.post('/playbilling/verify', moneyLimiter, requirePlayBilling, async (req, res, next) => {
   try {
@@ -91,11 +92,10 @@ router.post('/playbilling/verify', moneyLimiter, requirePlayBilling, async (req,
       return res.json({ verified: true, subscription: result });
     }
 
-    // Paid prompt unlock.
+    // Paid prompt unlock is wallet-only — POST /payments/wallet/buy. A prompt_*
+    // product hitting Play Billing verify is a misconfigured client.
     if (productId?.startsWith('prompt_')) {
-      const result = await grantPromptUnlock({ buyerId: req.userId, productId, purchaseToken });
-      if (result.error) return next(httpError(result.error.status, result.error.message));
-      return res.json({ verified: true, ...result });
+      return next(httpError(400, 'Paid prompts are purchased from your wallet — see /payments/wallet/buy'));
     }
 
     // Ad-free (one-time, non-consumable).
@@ -165,7 +165,8 @@ router.delete('/subscriptions', moneyLimiter, async (req, res, next) => {
 /**
  * GET /payments/wallet — the signed-in user's multi-balance wallet breakdown:
  * earnings (withdrawable), deposits (own money), bonus (expiring credits).
- * Returns per-balance amounts, type metadata, and bonus vintages for the UI.
+ * Returns per-balance amounts, type metadata, and sanitized `bonusCredits`
+ * (opaque ids — never the raw internal vintage ids).
  */
 router.get('/wallet', async (req, res, next) => {
   try {

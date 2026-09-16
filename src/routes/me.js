@@ -8,6 +8,7 @@ import { listNotifications, markNotificationsRead } from '../services/notificati
 import { uploadImage } from '../services/storage.service.js';
 import { parsePaging } from '../utils/paging.js';
 import { httpError } from '../utils/http-error.js';
+import { serializeUser } from '../utils/serialize-user.js';
 
 const router = Router();
 
@@ -52,7 +53,7 @@ const paging = (req) => parsePaging(req.query);
 router.get('/profile', async (req, res, next) => {
   try {
     const profile = await getProfile(req.userId);
-    return res.json({ user: req.user, isAdmin: isAdminEmail(req.user?.email), ...profile });
+    return res.json({ user: serializeUser(req.user), isAdmin: isAdminEmail(req.user?.email), ...profile });
   } catch (err) {
     return next(err);
   }
@@ -163,7 +164,7 @@ router.post('/upi', async (req, res, next) => {
     const parsed = upiSchema.safeParse(req.body ?? {});
     if (!parsed.success) return next(httpError(400, parsed.error.issues[0]?.message ?? 'Invalid body — expected { upiId: string }'));
     const user = await setUpiId(req.userId, parsed.data.upiId);
-    return res.json({ user });
+    return res.json({ user: serializeUser(user) });
   } catch (err) {
     return next(err);
   }
@@ -191,7 +192,7 @@ router.post('/bank', async (req, res, next) => {
     const parsed = bankSchema.safeParse(req.body ?? {});
     if (!parsed.success) return next(httpError(400, parsed.error.issues[0]?.message ?? 'Invalid body'));
     const user = await setBankDetails(req.userId, parsed.data);
-    return res.json({ user });
+    return res.json({ user: serializeUser(user) });
   } catch (err) {
     return next(err);
   }
@@ -204,7 +205,7 @@ router.post('/bank', async (req, res, next) => {
 router.delete('/bank', async (req, res, next) => {
   try {
     const user = await clearBankDetails(req.userId);
-    return res.json({ user });
+    return res.json({ user: serializeUser(user) });
   } catch (err) {
     return next(err);
   }
@@ -251,7 +252,7 @@ router.post(
     try {
       const panImageUrl = await uploadKycImage(req, req.userId);
       const user = await setBankDetails(req.userId, { panImageUrl });
-      return res.json({ user, panImageUrl });
+      return res.json({ user: serializeUser(user), panImageUrl });
     } catch (err) {
       return next(err);
     }
@@ -269,7 +270,7 @@ router.post(
     try {
       const bankAccountImageUrl = await uploadKycImage(req, req.userId);
       const user = await setBankDetails(req.userId, { bankAccountImageUrl });
-      return res.json({ user, bankAccountImageUrl });
+      return res.json({ user: serializeUser(user), bankAccountImageUrl });
     } catch (err) {
       return next(err);
     }
@@ -285,7 +286,7 @@ router.patch('/profile', async (req, res, next) => {
     const parsed = profilePatchSchema.safeParse(req.body ?? {});
     if (!parsed.success) return next(httpError(400, parsed.error.issues[0]?.message ?? 'Invalid body'));
     const user = await updateProfile(req.userId, parsed.data);
-    return res.json({ user });
+    return res.json({ user: serializeUser(user) });
   } catch (err) {
     return next(err);
   }
@@ -310,7 +311,7 @@ router.post(
         contentType,
       });
       const user = await updateProfile(req.userId, { avatarUrl });
-      return res.json({ user, avatarUrl });
+      return res.json({ user: serializeUser(user), avatarUrl });
     } catch (err) {
       return next(err);
     }
