@@ -50,6 +50,30 @@ function opaqueId(creditId) {
   return crypto.createHash('sha256').update(String(creditId)).digest('hex').slice(0, 16);
 }
 
+/**
+ * Sanitize a wallet-spend split before exposing it to clients. The internal
+ * consumed-vintage ids (refIds / Play-token derivations) are hashed to opaque
+ * ids so a purchase response never leaks internal identifiers. Shape mirrors
+ * what `debitBalancesTx` returns, minus anything internal.
+ */
+function sanitizeSpendSplit(split) {
+  if (!Array.isArray(split)) return [];
+  return split.map((s) => {
+    const out = {
+      balanceType: s.balanceType,
+      debited: s.debited,
+      newBalance: s.newBalance,
+    };
+    if (Array.isArray(s.consumed) && s.consumed.length) {
+      out.consumed = s.consumed.map((c) => ({
+        id: opaqueId(c.vintageId),
+        amount: c.amount,
+      }));
+    }
+    return out;
+  });
+}
+
 /** Read the numeric amount of a balance bucket (0 when doc/bucket missing). */
 function bucketAmount(wallet, balanceType) {
   return Number(wallet?.[balanceType] ?? 0);
@@ -192,27 +216,44 @@ export async function creditBalance(userId, balanceType, amountInr, meta = {}) {
  * (deposits → earnings → bonus). `bonus` is capped at `maxUsePercent` (10%) of
  * the item price so it's always a discount, never the whole payment.
  */
-export async function calculatePaymentSplit(userId, itemPriceInr) {
+export async function calculatePaymentSplit(userId, itemPriceInr, opts) {
   const wallet = await getWallet(userId);
-  return calculateSplitFromBalances(wallet.balances, itemPriceInr);
+  return calculateSplitFromBalances(wallet.balances, itemPriceInr, opts);
 }
 
 /**
  * Pure split math for a wallet balances map + item price. The map is the shape
  * `getWallet().balances` returns: `{ earnings: { amountInr }, deposits: {...},
- * bonus: {...} }`. Split by priority (deposits → earnings → bonus), each capped
- * at `maxUsePercent` of the item. Exported for unit tests — no Firestore.
+ * bonus: {...} }`. Split by priority (default deposits → earnings → bonus),
+ * each capped at `maxUsePercent` of the item. Exported for unit tests — no
+ * Firestore.
+ *
+ * `opts` overrides for callers that need a different spend order / cap basis:
+ *  - `opts.order` — array of balance-type ids in spend order. The buy flow
+ *    passes `['bonus','deposits','earnings']` so bonus is consumed FIRST (up
+ *    to its cap), before any deposit/earnings money.
+ *  - `opts.capBase` — per-type amount the `maxUsePercent` cap is computed
+ *    against (default the item price). Buy passes `{ bonus: priceInr }` so
+ *    bonus is capped at 10% of the raw PRICE, never the 5%-fee-inclusive
+ *    total — the transaction fee always comes from deposits/earnings.
  */
-export function calculateSplitFromBalances(balances, itemPriceInr) {
+export function calculateSplitFromBalances(balances, itemPriceInr, opts = {}) {
   const remaining = { value: toMoney(itemPriceInr) };
   const split = [];
 
-  for (const typeCfg of getBalanceTypesByPriority()) {
+  const order = opts?.order?.length
+    ? opts.order
+        .map((id) => BALANCE_TYPES[id])
+        .filter((typeCfg) => typeCfg?.id)
+    : getBalanceTypesByPriority();
+
+  for (const typeCfg of order) {
     if (remaining.value <= 0) break;
     const bal = toMoney(balances?.[typeCfg.id]?.amountInr ?? 0);
     if (bal <= 0) continue;
 
-    const maxFromType = toMoney(itemPriceInr * (typeCfg.maxUsePercent / 100));
+    const capBase = opts?.capBase?.[typeCfg.id] ?? itemPriceInr;
+    const maxFromType = toMoney(capBase * (typeCfg.maxUsePercent / 100));
     const use = toMoney(Math.min(bal, maxFromType, remaining.value));
     if (use > 0) {
       split.push({ balanceType: typeCfg.id, amountToUse: use });
@@ -708,7 +749,7 @@ export async function spendFromWallet({ userId, itemPriceInr, refId, note }) {
 
   return {
     success: true,
-    split: results,
+    split: sanitizeSpendSplit(results),
     totalCovered: toMoney(split.totalCovered),
     remaining: split.remaining,
     wallet: (await getWallet(userId)).balances,
@@ -721,9 +762,11 @@ export async function spendFromWallet({ userId, itemPriceInr, refId, note }) {
  * `price × 1.05` (5% transaction fee), and the wallet covers the WHOLE
  * amount in ONE transaction (no second payment):
  *
- *   1. debits the wallet each split bucket (deposits → earnings → bonus,
- *      bonus capped at 10% of the total due, i.e. price + fee) via
- *      `debitBalances` — throws when a bucket can't cover,
+ *   1. debits the wallet each split bucket via `debitBalancesTx` — spend order
+ *      is BONUS FIRST (capped at 10% of the raw price), then deposits →
+ *      earnings cover the balance, so the 5% transaction fee is always paid
+ *      from deposits/earnings, never from bonus; throws when a bucket can't
+ *      cover,
  *   2. writes the deterministic `prompt_purchases/{buyerId}_{promptId}` row
  *      (`gateway:'wallet'`, `status:'completed'`, with `buyerPaysInr` = price
  *      + fee and `transactionFeeInr`), so `getPromptById` / `getPurchasedPrompts`
@@ -738,7 +781,13 @@ export async function spendFromWallet({ userId, itemPriceInr, refId, note }) {
  * a replay returns the existing purchase without double-debiting.
  *
  * Returns `{ success, unlocked, promptId, purchaseId, buyerPaysInr,
- * transactionFeeInr, wallet }` or `{ error: { status, message }, shortfall? }`.
+ * transactionFeeInr, split, wallet }` or `{ error: { status, message },
+ * shortfall? }`. `split` is the per-bucket debit breakdown (bonus →
+ * deposits → earnings — the buy spend order), each entry `{ balanceType,
+ * debited, newBalance }` and for bonus also `consumed: [{ id (hashed),
+ * amount }]` — the same shape `spendFromWallet` returns, so clients can show
+ * exactly how much bonus was
+ * used on the purchase.
  */
 export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refId }) {
   if (!refId || !String(refId).trim() || !String(refId).startsWith('prompt_')) {
@@ -786,10 +835,16 @@ export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refI
   const transactionFeeInr = toMoney(buyerPaysInr - priceInr);
 
   // Re-validate that the wallet can actually cover the TOTAL due (price + 5%
-  // fee), never trust the client's preview. `debitBalances` throws
+  // fee), never trust the client's preview. `debitBalancesTx` throws
   // `{ insufficient }` below if a bucket can't cover its entry — translate to
   // a friendly 402 (shortfall measured against buyerPaysInr).
-  const split = await calculatePaymentSplit(userId, buyerPaysInr);
+  //
+  // Spend order for a prompt buy: BONUS FIRST (up to 10% of the raw price),
+  // then deposits → earnings cover the balance. The 10% bonus cap is measured
+  // against the price, not the fee-inclusive total — so the 5% transaction fee
+  // is always paid from deposits/earnings, never from bonus.
+  const BONUS_FIRST = { order: ['bonus', 'deposits', 'earnings'], capBase: { bonus: priceInr } };
+  const split = await calculatePaymentSplit(userId, buyerPaysInr, BONUS_FIRST);
   if (split.totalCovered < buyerPaysInr - 0.001) {
     const shortfall = toMoney(buyerPaysInr - split.totalCovered);
     return {
@@ -820,8 +875,9 @@ export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refI
           : null;
 
       // 1) Debit the wallet — per-bucket ledger rows, from the pre-read balance.
+      const spendSplit = [];
       for (const s of split.split) {
-        await debitBalancesTx(
+        const debit = await debitBalancesTx(
           tx,
           userId,
           buyerWallet,
@@ -829,6 +885,7 @@ export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refI
           s.amountToUse,
           { type: 'wallet_spend', refId: ledgerRefId, note: `Wallet purchase of "${prompt.title}"` },
         );
+        if (debit) spendSplit.push(debit);
       }
 
       // 2) Purchase row (deterministic id — one per buyer per prompt).
@@ -876,7 +933,7 @@ export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refI
     if (err.alreadyOwns) return { error: { status: 409, message: 'You already own this prompt' } };
     if (/ABORTED|already exists/i.test(err.message)) return { error: { status: 409, message: 'You already own this prompt' } };
     if (err.insufficient) {
-      const shortfall = toMoney(buyerPaysInr - (await walletCovered(userId, buyerPaysInr)));
+      const shortfall = toMoney(buyerPaysInr - (await walletCovered(userId, buyerPaysInr, BONUS_FIRST)));
       return { error: { status: 402, message: `Insufficient wallet balance — add ₹${shortfall} to continue` }, shortfall };
     }
     throw err;
@@ -909,6 +966,7 @@ export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refI
     purchaseId,
     buyerPaysInr,
     transactionFeeInr,
+    split: sanitizeSpendSplit(spendSplit),
     wallet: (await getWallet(userId)).balances,
   };
 }
@@ -966,7 +1024,7 @@ async function debitBalancesTx(tx, userId, wallet, balanceType, amountInr, meta)
 }
 
 /** How much of `itemPriceInr` the wallet currently covers (for 402 shortfall math). */
-export async function walletCovered(userId, itemPriceInr) {
-  const split = await calculatePaymentSplit(userId, itemPriceInr);
+export async function walletCovered(userId, itemPriceInr, opts) {
+  const split = await calculatePaymentSplit(userId, itemPriceInr, opts);
   return toMoney(split.totalCovered);
 }

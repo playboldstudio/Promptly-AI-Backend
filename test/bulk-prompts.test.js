@@ -6,8 +6,8 @@ import { validateBulkRows, isImageFilename, normalizeImageName } from '../src/ut
 const SAMPLE_CSV = [
   'title,description,promptText,category,tags,isPaid,priceInr,image',
   'Cinematic Portrait,Cinematic portrait prompt,A cinematic...,portrait,"cinematic,portrait",false,,001.jpg',
-  'Luxury Fashion,Luxury fashion prompt,Editorial fashion...,fashion,"luxury,editorial",true,49,002.jpg',
-  'Travel Shot,Travel photography prompt,Beautiful travel...,travel,"travel,photo",false,,003.jpg',
+  'Luxury Studio,Luxury studio prompt,Editorial studio...,studio,"luxury,editorial",true,49,002.jpg',
+  'Vintage Travel,Vintage travel prompt,Beautiful retro...,vintage,"travel,retro",false,,003.jpg',
 ].join('\n');
 
 test('parseCsv: handles quotes, commas and header mapping', () => {

@@ -155,8 +155,12 @@ export async function calculatePaymentSplit(userId, itemPriceInr) {
 }
 ```
 
-> **Note:** `bonus` is `priority: 3`, so it's *always spent last* — the user's own
-> money (deposits → earnings) is consumed before bonus. That's the intended UX.
+> **Note:** default spend order is `deposits (1) → earnings (2) → bonus (3)` —
+> the user's own money is consumed before bonus. The **paid-prompt buy flow**
+> (`buyPromptWithWallet`) overrides this: it passes `{ order: ['bonus',
+> 'deposits', 'earnings'], capBase: { bonus: priceInr } }` so bonus is consumed
+> **FIRST** (capped at 10% of the raw price, never the fee-inclusive total) and
+> the 5% transaction fee always comes from deposits/earnings.
 
 ### 4.4 `debitBalances`
 

@@ -255,7 +255,7 @@ const walletBuySchema = z.object({
  * so a retry never double-charges.
  *
  * Body: { itemPriceInr, refId } → { success, unlocked, promptId, purchaseId,
- * buyerPaysInr, transactionFeeInr, wallet }
+ * buyerPaysInr, transactionFeeInr, split, wallet }
  * On insufficient funds → 402 { error, shortfall } and the client routes to Top-up.
  */
 router.post('/wallet/buy', moneyLimiter, async (req, res, next) => {

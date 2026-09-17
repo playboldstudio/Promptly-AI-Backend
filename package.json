@@ -12,6 +12,7 @@
     "start": "node src/server.js",
     "db:seed": "node src/db/seed.js",
     "db:migrate-wallets": "node src/db/migrate-wallets.js",
+    "db:migrate-categories": "node src/db/migrate-categories.js",
     "wallet:expire": "node src/scripts/expireBonus.js",
     "reconcile": "node src/scripts/reconcile.js",
     "test": "node --test"

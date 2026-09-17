@@ -170,8 +170,8 @@ Body:
 }
 ```
 
-Category enum: `portrait | fashion | cinematic | product | travel | creative |
-social | photography | other`.
+Category enum: `portrait | studio | vintage | retro | cinematic | anime | art |
+birthday | festive | other`.
 
 Response — **201**:
 ```json
@@ -1027,7 +1027,7 @@ Response:
   "success": true,
   "split": [
     { "balanceType": "deposits", "debited": 85, "newBalance": 0 },
-    { "balanceType": "bonus", "debited": 4.1, "newBalance": 25.9, "consumed": [ { "vintageId": "…", "amount": 4.1 } ] }
+    { "balanceType": "bonus", "debited": 4.1, "newBalance": 25.9, "consumed": [ { "id": "a1b2c3d4e5f60718", "amount": 4.1 } ] }
   ],
   "totalCovered": 89.1,
   "remaining": 9.9,
@@ -1043,11 +1043,12 @@ Errors: `400` `itemPriceInr` not positive / `refId` missing; `401` unauthenticat
 
 **The only way to purchase a paid prompt** — paid prompt unlocks no longer go
 through Play Billing (`playbilling/verify` rejects `prompt_*`). Buyer pays
-`price × 1.05` (5% tx fee); the wallet covers the **full** total — deposits →
-earnings (up to 100%), then bonus (up to 10% of the total due). Author credited
-the gross. In one transaction: debit the split, write the completed
-`prompt_purchases` row (`gateway: "wallet"`), credit author earnings, append
-sale ledger. Idempotent by `refId = prompt_<id>`.
+`price × 1.05` (5% tx fee); the wallet covers the **full** total — **bonus up
+to 10% of the raw price is consumed FIRST, then deposits → earnings cover the
+balance** (the 5% transaction fee is always paid from deposits/earnings, never
+bonus). Author credited the gross. In one transaction: debit the split, write
+the completed `prompt_purchases` row (`gateway: "wallet"`), credit author
+earnings, append sale ledger. Idempotent by `refId = prompt_<id>`.
 
 Body: `{ "itemPriceInr": 99, "refId": "prompt_<promptId>" }`
 
@@ -1060,9 +1061,20 @@ Response:
   "purchaseId": "<buyerId>_<promptId>",
   "buyerPaysInr": 103.95,
   "transactionFeeInr": 4.95,
+  "split": [
+    { "balanceType": "bonus", "debited": 9.9, "newBalance": 15.6, "consumed": [ { "id": "a1b2c3d4e5f60718", "amount": 9.9 } ] },
+    { "balanceType": "deposits", "debited": 91.05, "newBalance": 10.9 },
+    { "balanceType": "earnings", "debited": 3, "newBalance": 27 }
+  ],
   "wallet": { "…": "balances map §10.2 (post-debit)" }
 }
 ```
+
+`split` is the per-bucket debit breakdown in the buy spend order — **bonus →
+deposits → earnings** (bonus first, capped at 10% of the raw price). Bonus
+entries include `consumed` with the **hashed** vintage id (`id`) so the client
+can show exactly how much bonus was used on a purchase without exposing
+internal refIds.
 
 Errors: `400` refId must be `prompt_<id>` / prompt free / price mismatch;
 `401`; `404` prompt missing or unpublished; `409` already owns / admin;
