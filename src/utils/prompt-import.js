@@ -11,13 +11,14 @@ import { csvToObjects } from './csv.js';
 
 export const PROMPT_CATEGORIES = [
   'portrait',
-  'fashion',
+  'studio',
+  'vintage',
+  'retro',
   'cinematic',
-  'product',
-  'travel',
-  'creative',
-  'social',
-  'photography',
+  'anime',
+  'art',
+  'birthday',
+  'festive',
   'other',
 ];
 

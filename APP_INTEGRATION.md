@@ -118,9 +118,11 @@ Play Console SKU and no Play Billing `verify` call. The app shows the wallet
 split via `GET /payments/wallet/allocate?itemPriceInr=<prompt.priceInr>`, then
 calls `POST /payments/wallet/buy` with body
 `{ itemPriceInr: <prompt.priceInr>, refId: "prompt_<promptId>" }`. The wallet
-covers the full total (**deposits → earnings up to 100%, then bonus up to 10%**
-of the price + 5% transaction fee). On `402 { error, shortfall }` the UI routes
-to a deposit Top-up. `playbilling/verify` rejects `prompt_*` product ids.
+covers the full total (**bonus up to 10% of the raw price is consumed FIRST,
+then deposits → earnings cover the balance — the 5% transaction fee always
+comes from deposits/earnings, never bonus**). On `402 { error, shortfall }` the
+UI routes to a deposit Top-up. `playbilling/verify` rejects `prompt_*` product
+ids.
 
 **RTDN Pub/Sub** (optional, for real-time revocations) → push to
 `POST /webhooks/google/rtdn`, subscription id in `RTDN_SUBSCRIPTION`. Not
