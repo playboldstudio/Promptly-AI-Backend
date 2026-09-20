@@ -1,4 +1,5 @@
 import { Router, raw } from 'express';
+import multer from 'multer';
 import { z } from 'zod';
 import {
   listPrompts,
@@ -32,31 +33,37 @@ const router = Router();
 
 const reportLimiter = rateLimit({ windowMs: 3600_000, max: 5, message: 'Too many reports — try again later' });
 
-const createPromptSchema = z
-  .object({
-    title: z.string().trim().min(1).max(60),
-    description: z.string().trim().min(1).max(100),
-    promptText: z.string().trim().min(1),
-    // Accept "" (empty) and whitespace as "no image" so the schema falls through
-    // to the friendly "A cover image is required" check instead of a raw "Invalid
-    // url" — the app may send an empty string when no image was picked yet.
-    imageUrl: z.preprocess(
-      (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
-      z.string().trim().url().optional().nullable(),
-    ),
-    images: z.preprocess(
-      (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.trim() !== '') : v),
-      z.array(z.string().trim().url()).max(10).optional(),
-    ),
-    category: z.enum(PROMPT_CATEGORIES),
-    tags: z.array(z.string().trim().min(1).max(40)).max(20).default([]),
-    isPaid: z.boolean().default(false),
-    priceInr: z.number().int().positive().optional().nullable(),
-  })
-  .refine((v) => !v.isPaid || (v.isPaid && v.priceInr), {
-    message: 'A paid prompt requires a positive priceInr',
-    path: ['priceInr'],
-  })
+/** Field rules shared by the JSON body and the multipart form. */
+const promptFieldsSchema = z.object({
+  title: z.string().trim().min(1).max(60),
+  description: z.string().trim().min(1).max(100),
+  promptText: z.string().trim().min(1),
+  // Accept "" (empty) and whitespace as "no image" so the schema falls through
+  // to the friendly "A cover image is required" check instead of a raw "Invalid
+  // url" — the app may send an empty string when no image was picked yet.
+  imageUrl: z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+    z.string().trim().url().optional().nullable(),
+  ),
+  images: z.preprocess(
+    (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.trim() !== '') : v),
+    z.array(z.string().trim().url()).max(10).optional(),
+  ),
+  category: z.enum(PROMPT_CATEGORIES),
+  tags: z.array(z.string().trim().min(1).max(40)).max(20).default([]),
+  isPaid: z.boolean().default(false),
+  priceInr: z.number().int().positive().optional().nullable(),
+});
+
+const paidRequiresPriceRule = (v) => !v.isPaid || (v.isPaid && v.priceInr);
+const paidRequiresPriceRefine = {
+  message: 'A paid prompt requires a positive priceInr',
+  path: ['priceInr'],
+};
+
+/** Full JSON-body schema — fields + paid/price + cover requirements. */
+const createPromptSchema = promptFieldsSchema
+  .refine(paidRequiresPriceRule, paidRequiresPriceRefine)
   .superRefine((v, ctx) => {
     const hasUrl = !!v.imageUrl?.trim();
     const hasImages = Array.isArray(v.images) && v.images.length > 0;
@@ -69,6 +76,14 @@ const createPromptSchema = z
     }
   });
 
+/**
+ * Multipart fields schema — same field rules and paid/price check as JSON, but
+ * NO cover superRefine: in a multipart request the cover/gallery URLs come from
+ * the uploaded files, so the "no cover" check runs after uploads (see
+ * createPromptFromMultipart) with the exact same friendly message.
+ */
+const multipartPromptSchema = promptFieldsSchema.refine(paidRequiresPriceRule, paidRequiresPriceRefine);
+
 /** Human-readable first validation error: "field: message" (e.g. "description: Required"). */
 function promptValidationMessage(error) {
   const issue = error?.issues?.[0];
@@ -77,17 +92,157 @@ function promptValidationMessage(error) {
   return field ? `${field}: ${issue.message}` : issue.message;
 }
 
+/* ── Multipart (POST /prompts) — fields + cover/gallery image files ─────────── */
+
+const PROMPT_IMAGE_MIME = ['image/jpeg', 'image/png', 'image/webp'];
+const PROMPT_IMAGE_FILE_SIZE = 5 * 1024 * 1024; // 5 MB per file
+const PROMPT_IMAGE_FIELDS = [
+  { name: 'image', maxCount: 1 }, // exactly one cover
+  { name: 'images', maxCount: 5 }, // up to five gallery images
+];
+
+/** In-memory multipart uploader — only POST /prompts uses it. */
+const promptUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: PROMPT_IMAGE_FILE_SIZE, files: 6 },
+  fileFilter: (_req, file, cb) => {
+    if (PROMPT_IMAGE_MIME.includes(String(file.mimetype ?? '').toLowerCase())) return cb(null, true);
+    return cb(httpError(400, 'Only JPG, PNG or WebP images are allowed'));
+  },
+});
+
+/** Convert a multer error into a clean httpError (message, never a stack trace). */
+export function httpizeMultipartError(err) {
+  if (err?.status) return err;
+  switch (err?.code) {
+    case 'LIMIT_FILE_SIZE':
+      return httpError(413, 'Image file is too large (max 5 MB each)');
+    case 'LIMIT_FILE_COUNT':
+      return httpError(400, 'Too many image files (max 1 cover + 5 gallery images)');
+    case 'LIMIT_UNEXPECTED_FILE':
+      return httpError(
+        400,
+        `Unexpected file field${err.field ? ` "${err.field}"` : ''} — use "image" (cover) or "images" (gallery)`,
+      );
+    case 'LIMIT_PART_COUNT':
+    case 'LIMIT_FIELD_COUNT':
+    case 'LIMIT_FIELD_VALUE':
+    case 'LIMIT_FIELD_KEY':
+      return httpError(400, 'Multipart request is malformed (too many fields or parts)');
+    default:
+      return httpError(400, String(err?.message ?? 'Invalid multipart upload').slice(0, 200));
+  }
+}
+
+/**
+ * Coerce a multipart `tags` field (multer gives strings) into array form.
+ * Handles the app's single comma-joined field ("cinematic,portrait") and a
+ * JSON-encoded array (["a","b"]) with a JSON.parse fallback.
+ */
+export function parseTags(value) {
+  if (value === undefined || value === null) return [];
+  const raw = String(value);
+  if (!raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.map((t) => String(t).trim()).filter(Boolean);
+  } catch {
+    // not JSON → treat as comma-joined
+  }
+  return raw.split(',').map((t) => t.trim()).filter(Boolean);
+}
+
+/** Coerce a multipart `isPaid` field: "true" / "1" → true, anything else → false. */
+export function parseIsPaid(value) {
+  const s = String(value ?? '').trim().toLowerCase();
+  return s === 'true' || s === '1';
+}
+
+/**
+ * Turn raw multipart text fields into the typed values zod expects. Invalid
+ * priceInr strings are left as strings so the schema rejects them with a clean
+ * "priceInr: ..." message instead of a silent NaN.
+ */
+export function coerceMultipartFields(raw) {
+  const out = { ...raw };
+  out.tags = parseTags(raw.tags);
+  out.isPaid = parseIsPaid(raw.isPaid);
+  if (raw.priceInr !== undefined && raw.priceInr !== null && String(raw.priceInr).trim() !== '') {
+    const n = Number.parseInt(String(raw.priceInr), 10);
+    out.priceInr = Number.isNaN(n) ? raw.priceInr : n;
+  }
+  return out;
+}
+
+/**
+ * Multipart-only body parser for POST /prompts. JSON requests pass straight
+ * through untouched (multer would otherwise drain/overwrite the parsed body).
+ */
+export function parseMultipart(req, res, next) {
+  if (!req.is('multipart/form-data')) return next();
+  promptUpload.fields(PROMPT_IMAGE_FIELDS)(req, res, (err) => {
+    if (err) return next(httpizeMultipartError(err));
+    return next();
+  });
+}
+
+/**
+ * Multipart branch of POST /prompts. Coerces the text fields, validates them
+ * with the same rules as JSON, then moderates + uploads every image file. The
+ * `image` file becomes the cover URL; the `images` files become the gallery.
+ */
+async function createPromptFromMultipart(req, res, next) {
+  try {
+    const fields = coerceMultipartFields(req.body ?? {});
+    const parsed = multipartPromptSchema.safeParse(fields);
+    if (!parsed.success) return next(httpError(400, promptValidationMessage(parsed.error)));
+
+    const allFiles = [...(req.files?.image ?? []), ...(req.files?.images ?? [])];
+
+    // No image files at all → same friendly "cover required" message as JSON.
+    if (allFiles.length === 0) {
+      return next(httpError(400, 'imageUrl: A cover image is required. Please add an image to your prompt.'));
+    }
+
+    const urls = [];
+    for (const file of allFiles) {
+      const contentType = String(file.mimetype ?? 'image/jpeg');
+      const mod = await moderateImage(file.buffer, contentType);
+      if (!mod.safe) return next(httpError(422, mod.reason));
+      const imageUrl = await uploadImage({
+        folder: `prompts/${req.userId}`,
+        buffer: file.buffer,
+        contentType,
+      });
+      urls.push(imageUrl);
+    }
+
+    const input = { ...parsed.data, imageUrl: urls[0], images: urls.slice(1) };
+    const result = await createPrompt({ userId: req.userId, input });
+    if (result.error) return next(httpError(result.error.status, result.error.message));
+    return res.status(201).json(result);
+  } catch (err) {
+    return next(err);
+  }
+}
+
 /**
  * POST /prompts — creator publish. Authenticated; authorId is the caller.
  * Unlimited free posts for every user; paid prompts require the Pro or
  * Creator plan (canPostPaid).
  *
- * Required fields: title, description, promptText, category, and a cover image
- * (imageUrl OR images[]). Optional: tags[], isPaid, priceInr (required when
- * isPaid=true).
+ * Body:
+ *  - JSON: title, description, promptText, category, imageUrl OR images[],
+ *    optional tags[], isPaid, priceInr.
+ *  - multipart/form-data: the same text fields (tags one comma-joined string,
+ *    isPaid "true"/"1", priceInr a number string) plus image files: `image`
+ *    (exactly 1 — the cover) and `images` (0-5 — the gallery).
  */
-router.post('/prompts', requireAuth, async (req, res, next) => {
+router.post('/prompts', requireAuth, parseMultipart, async (req, res, next) => {
   try {
+    if (req.is('multipart/form-data')) {
+      return createPromptFromMultipart(req, res, next);
+    }
     const parsed = createPromptSchema.safeParse(req.body ?? {});
     if (!parsed.success) return next(httpError(400, promptValidationMessage(parsed.error)));
     const result = await createPrompt({ userId: req.userId, input: parsed.data });
