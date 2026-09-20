@@ -166,6 +166,7 @@ Bearer token, **✅+admin** = required token + admin email.
 | GET | `/me/transactions` | ✅ | My Account ledger rows |
 | GET | `/me/notifications` | ✅ | In-app inbox (bonus-expiry reminders). `?unreadOnly=&limit=&offset=` |
 | POST | `/me/notifications/read` | ✅ | Mark my notifications read — `{ ids: string[] }`, only own rows |
+| POST | `/me/fcm-token` | ✅ | Register/refresh my FCM push token — `{ token }`, latest wins (stored on user, never returned) |
 | GET | `/me/purchases` | ✅ | Prompts the user has bought/unlocked |
 | GET | `/me/earnings` | ✅ | Earnings summary (lifetime, withdrawn, pending, balance) |
 | GET | `/me/earnings/prompts` | ✅ | Per-prompt earnings breakdown |
@@ -184,7 +185,7 @@ Bearer token, **✅+admin** = required token + admin email.
 | POST | `/payments/wallet/buy` | ✅ | **The paid-prompt purchase path** (no gateway). Body `{ itemPriceInr, refId: "prompt_<promptId>" }`. Buyer pays `price × 1.05`; bonus up to 10% of the raw price is consumed **FIRST**, then deposits → earnings cover the balance (**the 5% transaction fee always comes from deposits/earnings, never bonus**); author credited gross to `earnings`. `402 + shortfall` → route to Top-up. |
 | POST | `/payments/playbilling/void` | ✅ | Body `{ productId, purchaseToken, isSubscription?, reason? }` → refund/void a purchase. Prompt → creator earnings debit (capped); deposit → net refund from deposits; ad-free → revoke unless sub-perk; subscription → mark voided. |
 | GET | `/payments/wallet` | ✅ | Wallet breakdown: `balances` (earnings / deposits / bonus with amounts + spend rules), `totalBalanceInr`, `bonusCredits` (sanitized per-credit bonus — hashed ids, no internal refIds/Play-token derivations) |
-| GET | `/payments/wallet/allocate` | ✅ | **Read-only** payment-source split preview: `?itemPriceInr=N` → per-bucket spend (deposits → earnings → bonus, 10% bonus cap). Builds on `calculatePaymentSplit` |
+| GET | `/payments/wallet/allocate` | ✅ | **Read-only** payment-source split preview: `?itemPriceInr=N` → named per-bucket amounts to use (`bonus`/`deposits`/`earnings`) + `totalCovered`/`remaining`. Builds on `calculatePaymentSplit` |
 | POST | `/payments/wallet/spend` | ✅ | **Spend wallet balances** as payment source. Body `{ itemPriceInr, refId, note? }`; debits the split (deposits → earnings → bonus, 10% cap), returns `totalCovered` + `remaining` residual. **Idempotent by `refId`** |
 | DELETE | `/payments/subscriptions` | ✅ | Cancel active subscription (user also cancels in Play Store) |
 | GET | `/payments/payouts/eligibility` | ✅ | Withdrawable balance, min withdrawal, eligible + blockers |

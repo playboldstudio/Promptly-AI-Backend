@@ -182,6 +182,9 @@ router.get('/wallet', async (req, res, next) => {
  * item price: how much comes from each wallet bucket (deposits → earnings →
  * bonus, with the 10% bonus spend cap). Read-only preview — the app shows this
  * before the Play Billing purchase. The actual spend happens at a later phase.
+ *
+ * Response carries the named per-bucket amounts the app renders (`bonus`,
+ * `deposits`, `earnings`), plus the raw `split` list for back-compat.
  */
 router.get('/wallet/allocate', async (req, res, next) => {
   try {
@@ -190,7 +193,15 @@ router.get('/wallet/allocate', async (req, res, next) => {
       return next(httpError(400, 'itemPriceInr must be a positive number'));
     }
     const result = await calculatePaymentSplit(req.userId, itemPriceInr);
-    return res.json(result);
+    const allocation = { bonus: 0, deposits: 0, earnings: 0 };
+    for (const s of result.split) allocation[s.balanceType] = s.amountToUse;
+    return res.json({
+      itemPriceInr,
+      ...allocation,
+      totalCovered: result.totalCovered,
+      remaining: result.remaining,
+      split: result.split,
+    });
   } catch (err) {
     return next(err);
   }
