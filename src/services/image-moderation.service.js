@@ -33,10 +33,20 @@ function isAtOrAbove(level, threshold) {
  * @returns {{ safe: boolean, reason?: string }}
  */
 export async function moderateImage(buffer, mimeType = 'image/jpeg') {
-  const [result] = await getClient().annotateImage({
-    image: { content: buffer.toString('base64') },
-    features: [{ type: 'SAFE_SEARCH_DETECTION' }],
-  });
+  let result;
+  try {
+    [result] = await getClient().annotateImage({
+      image: { content: buffer.toString('base64') },
+      features: [{ type: 'SAFE_SEARCH_DETECTION' }],
+    });
+  } catch (err) {
+    // Moderation is best-effort: a Vision outage / permission issue must never
+    // turn into a 500 that blocks every upload. Log and allow the upload.
+    console.warn(
+      `[moderation] Vision unavailable, allowing upload: ${err?.code ?? ''} ${String(err?.message ?? '').slice(0, 160)}`
+    );
+    return { safe: true, moderationSkipped: true };
+  }
 
   const ss = result.safeSearchAnnotation;
   if (!ss) return { safe: true };

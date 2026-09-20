@@ -12,6 +12,12 @@ import { env } from '../config/env.js';
 
 const BUCKET = env.STORAGE_BUCKET || `${env.FIREBASE_PROJECT_ID}.appspot.com`;
 
+/** True when the GCS error means the bucket itself is missing/misconfigured. */
+function isBucketConfigError(err) {
+  const msg = String(err?.message ?? err?.errors?.[0]?.message ?? '');
+  return /bucket does not exist|404 not found|bucket[^.]*not found|storage bucket.*configured/i.test(msg);
+}
+
 const MIME_BY_EXT = {
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
@@ -52,11 +58,24 @@ export async function uploadImage({ folder, buffer, contentType = 'image/jpeg' }
   const path = `${folder}/${Date.now()}-${random}.${ext}`;
 
   const file = getStorage(adminApp).bucket(BUCKET).file(path);
-  await file.save(buffer, {
-    contentType: mime,
-    metadata: { cacheControl: 'public, max-age=31536000, immutable' },
-    resumable: false,
-  });
+  try {
+    await file.save(buffer, {
+      contentType: mime,
+      metadata: { cacheControl: 'public, max-age=31536000, immutable' },
+      resumable: false,
+    });
+  } catch (err) {
+    // A missing/non-existent bucket (e.g. STORAGE_BUCKET not set on a dev
+    // service) would otherwise surface as a raw 500 on every upload. Surface
+    // it as a clean 503 so misconfiguration is obvious.
+    if (isBucketConfigError(err)) {
+      throw Object.assign(
+        new Error('Image storage is not configured — uploads are unavailable'),
+        { status: 503 }
+      );
+    }
+    throw err;
+  }
 
   // Bucket IAM grants allUsers objectViewer → public read via this URL.
   return `https://storage.googleapis.com/${BUCKET}/${path}`;
