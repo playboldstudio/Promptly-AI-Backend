@@ -212,9 +212,27 @@ export async function creditBalance(userId, balanceType, amountInr, meta = {}) {
 /* ── Debit (with FEFO bonus consume) ───────────────────────────────────── */
 
 /**
- * Compute how much of an item price each balance type covers, in spend order
- * (deposits → earnings → bonus). `bonus` is capped at `maxUsePercent` (10%) of
- * the item price so it's always a discount, never the whole payment.
+ * The wallet spend order for a paid-prompt purchase — and its read-only preview:
+ * BONUS FIRST (capped at `maxUsePercent`, 10%, of the RAW price), then deposits,
+ * then earnings. Single source of truth so `GET /payments/wallet/allocate` shows
+ * the exact split the buy flow (`buyPromptWithWallet`) will charge.
+ *
+ * The 10% bonus cap is measured against `itemPriceInr`, not the fee-inclusive
+ * total, so the 5% transaction fee is always paid from deposits/earnings.
+ */
+export function bonusFirstOpts(itemPriceInr) {
+  return {
+    order: ['bonus', 'deposits', 'earnings'],
+    capBase: { bonus: toMoney(itemPriceInr) },
+  };
+}
+
+/**
+ * Compute how much of an item price each balance type covers. Default spend
+ * order is deposits → earnings → bonus (own money first); callers that need the
+ * paid-prompt flow pass `bonusFirstOpts(priceInr)` so bonus is consumed FIRST up
+ * to its 10% cap. `bonus` is always capped at `maxUsePercent` (10%) of the item
+ * price basis so it's a discount, never the whole payment.
  */
 export async function calculatePaymentSplit(userId, itemPriceInr, opts) {
   const wallet = await getWallet(userId);
@@ -843,8 +861,8 @@ export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refI
   // then deposits → earnings cover the balance. The 10% bonus cap is measured
   // against the price, not the fee-inclusive total — so the 5% transaction fee
   // is always paid from deposits/earnings, never from bonus.
-  const BONUS_FIRST = { order: ['bonus', 'deposits', 'earnings'], capBase: { bonus: priceInr } };
-  const split = await calculatePaymentSplit(userId, buyerPaysInr, BONUS_FIRST);
+  const splitOpts = bonusFirstOpts(priceInr);
+  const split = await calculatePaymentSplit(userId, buyerPaysInr, splitOpts);
   if (split.totalCovered < buyerPaysInr - 0.001) {
     const shortfall = toMoney(buyerPaysInr - split.totalCovered);
     return {
@@ -933,7 +951,7 @@ export async function buyPromptWithWallet({ userId, itemPriceInr, promptId, refI
     if (err.alreadyOwns) return { error: { status: 409, message: 'You already own this prompt' } };
     if (/ABORTED|already exists/i.test(err.message)) return { error: { status: 409, message: 'You already own this prompt' } };
     if (err.insufficient) {
-      const shortfall = toMoney(buyerPaysInr - (await walletCovered(userId, buyerPaysInr, BONUS_FIRST)));
+      const shortfall = toMoney(buyerPaysInr - (await walletCovered(userId, buyerPaysInr, splitOpts)));
       return { error: { status: 402, message: `Insufficient wallet balance — add ₹${shortfall} to continue` }, shortfall };
     }
     throw err;

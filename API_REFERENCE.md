@@ -1011,27 +1011,30 @@ ids; the raw map keys are never exposed.
 
 ### `GET /payments/wallet/allocate?itemPriceInr=99` — auth
 
-Read-only preview: how an item price would split across wallet buckets
-(deposits → earnings → bonus; bonus capped at 10% of the price).
+Read-only preview: how an item price would split across wallet buckets. For
+paid prompts this mirrors the buy flow **bonus FIRST** (capped at 10% of
+`itemPriceInr`), then **deposits → earnings**.
 
 Response:
 ```json
 {
   "itemPriceInr": 99,
-  "bonus": 4.1,
-  "deposits": 85,
-  "earnings": 9.9,
+  "bonus": 9.9,
+  "deposits": 49.5,
+  "earnings": 39.6,
   "totalCovered": 99,
   "remaining": 0,
   "split": [
-    { "balanceType": "deposits", "amountToUse": 85 },
-    { "balanceType": "earnings", "amountToUse": 9.9 },
-    { "balanceType": "bonus", "amountToUse": 4.1 }
-  ]
+    { "balanceType": "bonus", "amountToUse": 9.9 },
+    { "balanceType": "deposits", "amountToUse": 49.5 },
+    { "balanceType": "earnings", "amountToUse": 39.6 }
+  ],
+  "wallet": { "earnings": { "amountInr": 60 }, "deposits": { "amountInr": 50 }, "bonus": { "amountInr": 40 } }
 }
 ```
 `bonus` / `deposits` / `earnings` are the named per-bucket amounts to use (0 when
 a bucket contributes nothing) — the app's purchase sheet renders these directly.
+`wallet` is the user's available balances (so the UI can show "X of Y").
 `split` is the raw per-bucket list (kept for back-compat). `split: []` with
 `remaining` = price when nothing is covered.
 

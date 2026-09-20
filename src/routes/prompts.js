@@ -37,8 +37,17 @@ const createPromptSchema = z
     title: z.string().trim().min(1).max(60),
     description: z.string().trim().min(1).max(100),
     promptText: z.string().trim().min(1),
-    imageUrl: z.string().trim().url().optional().nullable(),
-    images: z.array(z.string().trim().url()).max(10).optional(),
+    // Accept "" (empty) and whitespace as "no image" so the schema falls through
+    // to the friendly "A cover image is required" check instead of a raw "Invalid
+    // url" — the app may send an empty string when no image was picked yet.
+    imageUrl: z.preprocess(
+      (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+      z.string().trim().url().optional().nullable(),
+    ),
+    images: z.preprocess(
+      (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.trim() !== '') : v),
+      z.array(z.string().trim().url()).max(10).optional(),
+    ),
     category: z.enum(PROMPT_CATEGORIES),
     tags: z.array(z.string().trim().min(1).max(40)).max(20).default([]),
     isPaid: z.boolean().default(false),
@@ -60,15 +69,27 @@ const createPromptSchema = z
     }
   });
 
+/** Human-readable first validation error: "field: message" (e.g. "description: Required"). */
+function promptValidationMessage(error) {
+  const issue = error?.issues?.[0];
+  if (!issue) return 'Invalid prompt body';
+  const field = Array.isArray(issue.path) && issue.path.length ? issue.path.join('.') : null;
+  return field ? `${field}: ${issue.message}` : issue.message;
+}
+
 /**
  * POST /prompts — creator publish. Authenticated; authorId is the caller.
  * Unlimited free posts for every user; paid prompts require the Pro or
  * Creator plan (canPostPaid).
+ *
+ * Required fields: title, description, promptText, category, and a cover image
+ * (imageUrl OR images[]). Optional: tags[], isPaid, priceInr (required when
+ * isPaid=true).
  */
 router.post('/prompts', requireAuth, async (req, res, next) => {
   try {
     const parsed = createPromptSchema.safeParse(req.body ?? {});
-    if (!parsed.success) return next(httpError(400, parsed.error.issues[0]?.message ?? 'Invalid prompt body'));
+    if (!parsed.success) return next(httpError(400, promptValidationMessage(parsed.error)));
     const result = await createPrompt({ userId: req.userId, input: parsed.data });
     if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.status(201).json(result);

@@ -8,7 +8,6 @@ import { resolveAvatarOnLogin } from '../utils/profile-login.js';
 import { serializeUser } from '../utils/serialize-user.js';
 import {
   applyReferralCode,
-  isOAuthSignIn,
 } from '../services/referrals/referral.service.js';
 
 const router = Router();
@@ -44,27 +43,23 @@ router.post('/auth/login', loginLimiter, async (req, res, next) => {
     if (!existing) patch.createdAt = new Date();
     await upsert(COLS.users, uid, patch);
 
-    // ── Referral: apply an invite code on signup (oAuth-only, graceful skip).
-    // Non-oAuth sign-ins and invalid codes log in fine but the bonus isn't
-    // given — the referral is best-effort and never blocks login.
+    // ── Referral: apply an invite code on signup. Works with EVERY sign-in
+    //    method — oAuth AND email/password (the referee's Firebase UID is the
+    //    "one account per real user" dedupe). Best-effort: an invalid or
+    //    duplicate code logs the user in fine — the bonus just isn't given.
     let referral = null;
     if (parsed.data.referralCode) {
-      const user = { signInProvider };
-      if (!isOAuthSignIn(user)) {
-        console.warn('Referral skipped — non-oAuth sign-in', uid);
+      const result = await applyReferralCode({
+        refereeId: uid,
+        code: parsed.data.referralCode,
+        playAccountId: parsed.data.playAccountId || null,
+        ipAddress: req.ip,
+      });
+      if (result.error) {
+        console.warn('Referral apply failed:', result.error.message);
+        referral = { applied: false, reason: result.error.message };
       } else {
-        const result = await applyReferralCode({
-          refereeId: uid,
-          code: parsed.data.referralCode,
-          playAccountId: parsed.data.playAccountId || null,
-          ipAddress: req.ip,
-        });
-        if (result.error) {
-          console.warn('Referral apply failed:', result.error.message);
-          referral = { applied: false, reason: result.error.message };
-        } else {
-          referral = { applied: true, ...result };
-        }
+        referral = { applied: true, ...result };
       }
     }
 

@@ -311,8 +311,9 @@ export async function getPromptById(id, viewerId) {
 
 /**
  * Publish a new prompt as the signed-in creator (authorId = caller). Everyone
- * may post unlimited free prompts; only PAID prompts are gated — they require
- * the Pro or Creator plan (canPostPaid).
+ * may post UNLIMITED free prompts; only PAID prompts are gated — they require
+ * the Pro or Creator plan (canPostPaid). Platform admins (ADMIN_EMAILS) bypass
+ * the paid gate (they moderate/import paid content already).
  */
 export async function createPrompt({ userId, input }) {
   const user = await findByPk(COLS.users, userId);
@@ -321,9 +322,16 @@ export async function createPrompt({ userId, input }) {
   const sub = await currentActiveSubscriptionWithPlan(userId);
   const plan = sub?.plan ?? null;
 
-  // GATE — paid prompts need a paid plan with canPostPaid (Pro or Creator).
-  if (input.isPaid && !plan?.canPostPaid) {
-    return { error: { status: 403, message: 'Paid prompts require the Pro or Creator plan' } };
+  // GATE — paid prompts need a paid plan with canPostPaid (Pro or Creator);
+  // free users can only post free prompts. Admins are exempt.
+  const isAdmin = isAdminEmail(user.email);
+  if (input.isPaid && !isAdmin && !plan?.canPostPaid) {
+    return {
+      error: {
+        status: 403,
+        message: 'Paid prompts require the Pro or Creator plan — free users can post unlimited free prompts',
+      },
+    };
   }
 
   const id = crypto.randomUUID();

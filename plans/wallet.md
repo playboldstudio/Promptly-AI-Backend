@@ -160,7 +160,9 @@ export async function calculatePaymentSplit(userId, itemPriceInr) {
 > (`buyPromptWithWallet`) overrides this: it passes `{ order: ['bonus',
 > 'deposits', 'earnings'], capBase: { bonus: priceInr } }` so bonus is consumed
 > **FIRST** (capped at 10% of the raw price, never the fee-inclusive total) and
-> the 5% transaction fee always comes from deposits/earnings.
+> the 5% transaction fee always comes from deposits/earnings. The read-only
+> preview `GET /payments/wallet/allocate` uses the same override
+> (`bonusFirstOpts`), so the app's preview and the buy flow always agree.
 
 ### 4.4 `debitBalances`
 
