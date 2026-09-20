@@ -18,11 +18,10 @@ import { zeroBalances } from '../payments/balance-types.js';
  *
  * Design principles:
  *   - IMMEDIATE qualification — no purchase required. Both referrer and referee
- *     get `bonus` instantly on a valid oAuth signup.
+ *     get `bonus` instantly on a valid signup (oAuth OR email/password).
  *   - Anti-abuse without a raw device ID:
- *       · oAuth-only signup (kills fake email/password farms)
  *       · Play Account ID (same Google account = same ID across reinstalls)
- *       · Firebase UID (one account per real user)
+ *       · Firebase UID (one account per real user — dedupes email/password too)
  *       · IP rate limiting on signup with a code
  *       · Max referrals per referrer (default 100)
  *   - Bonus is `bonus`-type: non-withdrawable, 10%-max spend, 90-day expiry
@@ -129,7 +128,8 @@ export async function validateReferralCode(code) {
 }
 
 /**
- * Apply a referral code at oAuth signup, crediting both sides as bonus.
+ * Apply a referral code at signup (oAuth or email/password — the Firebase UID
+ * dedupes "one bonus per real user" for both), crediting both sides as bonus.
  *
  * Runs the whole grant (referral row + device fingerprint + both bonus
  * credits) inside ONE Firestore transaction so a crash mid-way can never

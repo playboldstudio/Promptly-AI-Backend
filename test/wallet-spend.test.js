@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calculateSplitFromBalances } from '../src/services/wallet.service.js';
+import { calculateSplitFromBalances, bonusFirstOpts } from '../src/services/wallet.service.js';
 
 // Buy flow split opts — mirrors buyPromptWithWallet: bonus FIRST, capped at
 // 10% of the RAW price (not the fee-inclusive total), then deposits → earnings.
@@ -136,4 +136,37 @@ test('wallet-buy: bonus-first order means deposits/earnings may be skipped entir
   assert.deepEqual(split.split, [{ balanceType: 'bonus', amountToUse: 10 }]);
   assert.equal(split.totalCovered, 10);
   assert.equal(split.remaining, 95);
+});
+
+test('wallet-allocate: preview shows bonus first (10% of price), then deposits, then earnings', () => {
+  // ₹99 prompt → bonus (10% cap) first, deposits, then earnings — the same
+  // split the buy flow charges, so the app preview matches the purchase.
+  const split = calculateSplitFromBalances(
+    balances({ deposits: 80, earnings: 60, bonus: 40 }),
+    99,
+    bonusFirstOpts(99),
+  );
+  assert.deepEqual(split.split, [
+    { balanceType: 'bonus', amountToUse: 9.9 },
+    { balanceType: 'deposits', amountToUse: 80 },
+    { balanceType: 'earnings', amountToUse: 9.1 },
+  ]);
+  assert.equal(split.totalCovered, 99);
+  assert.equal(split.remaining, 0);
+});
+
+test('wallet-allocate: bonus-first still caps bonus at 10% of the raw price basis', () => {
+  // Lots of bonus + plenty of deposits → bonus takes exactly 10% of 99, then
+  // deposits cover the rest; earnings untouched.
+  const split = calculateSplitFromBalances(
+    balances({ deposits: 200, earnings: 0, bonus: 500 }),
+    99,
+    bonusFirstOpts(99),
+  );
+  assert.deepEqual(split.split, [
+    { balanceType: 'bonus', amountToUse: 9.9 },
+    { balanceType: 'deposits', amountToUse: 89.1 },
+  ]);
+  assert.equal(split.totalCovered, 99);
+  assert.equal(split.remaining, 0);
 });

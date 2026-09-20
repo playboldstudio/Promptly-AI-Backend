@@ -139,7 +139,7 @@ All require the Firebase ID token (Bearer). All under `{base}/payments`.
 | `POST /playbilling/void` | `{ productId, purchaseToken, isSubscription?:bool, reason? }` | `{ success:true, type, … }` | Void/refund. For subscriptions `isSubscription:true`. |
 | `DELETE /subscriptions` | — | `{ success, subscriptionId, planId, note }` | Marks local sub cancelled (user still cancels in Play Store). |
 | `GET /wallet` | — | `{ balances:{ earnings, deposits, bonus }, bonusCredits:[{id,amountInr,expiresAt}], … }` | Multi-balance wallet breakdown. `bonusCredits` ids are opaque hashes (never internal refIds / token derivations). |
-| `GET /wallet/allocate?itemPriceInr=99` | — | `{ split:[{balanceType,amountToUse}], totalCovered, remaining, wallet }` | Read-only preview of the payment split before a real purchase. |
+| `GET /wallet/allocate?itemPriceInr=99` | — | `{ bonus, deposits, earnings, totalCovered, remaining, split, wallet }` — bonus first (10% cap), then deposits → earnings | Read-only preview of the payment split before a real purchase; mirrors the buy flow. |
 | `POST /wallet/spend` | `{ itemPriceInr, refId, note? }` | `{ success, totalCovered, remaining, wallet, split }` | Debit wallet as partial payment; `refId` idempotency. |
 | `GET /payouts/eligibility` | — | `{ withdrawableBalance, minWithdrawalInr, eligible, blockers }` | Creator withdrawal rules. |
 | `POST /payouts` | `{ amountInr }` | payout + balance | Request a withdrawal (min ₹60). |

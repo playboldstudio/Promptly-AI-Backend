@@ -9,15 +9,19 @@
  * KYC / bank details remain reachable via `GET /me/bank` only.
  */
 
+import { isAdminEmail } from '../config/env.js';
+
 export function serializeUser(user) {
   if (!user) return null;
+  const isAdmin = Boolean(user.email && isAdminEmail(user.email));
   return {
     id: user.id,
     fullName: user.fullName ?? null,
     bio: user.bio ?? null,
     avatarUrl: user.avatarUrl ?? null,
     email: user.email ?? null,
-    role: user.role ?? 'viewer',
+    role: isAdmin ? 'admin' : (user.role ?? 'viewer'),
+    isAdmin,
     adFree: Boolean(user.adFree),
   };
 }

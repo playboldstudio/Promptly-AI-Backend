@@ -9,7 +9,6 @@ import {
   getReferralCode,
   validateReferralCode,
   applyReferralCode,
-  isOAuthSignIn,
   getReferralStats,
   getReferralList,
 } from '../services/referrals/referral.service.js';
@@ -35,7 +34,7 @@ const applySchema = z.object({
  *   POST /referrals/code        — generate (or return) my code   [auth]
  *   GET  /referrals/code        — get (creating if absent) code  [auth]
  *   GET  /referrals/:code/validate — check a code publicly       [public]
- *   POST /referrals/apply       — apply a code at signup         [auth, oAuth-only]
+ *   POST /referrals/apply       — apply a code at signup         [auth]
  *   GET  /referrals/stats       — my invite stats                [auth]
  *   GET  /referrals/list        — my invites                     [auth]
  */
@@ -77,16 +76,11 @@ router.get('/:code/validate', referralLimiter, async (req, res, next) => {
   }
 });
 
-// ─── Apply (signup, oAuth-only) ──────────────────────────────────────────
+// ─── Apply (signup) ─────────────────────────────────────────────────────
 router.post('/apply', referralLimiter, async (req, res, next) => {
   try {
     const parsed = applySchema.safeParse(req.body ?? {});
     if (!parsed.success) return next(httpError(400, 'Missing referral code'));
-
-    // oAuth-only gate — non-oAuth sign-ins get a graceful skip.
-    if (!isOAuthSignIn(req.user)) {
-      return next(httpError(400, 'Referral codes apply to oAuth sign-ups only'));
-    }
 
     const result = await applyReferralCode({
       refereeId: req.userId,

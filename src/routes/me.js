@@ -2,7 +2,7 @@ import { Router, raw } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../middleware/auth.js';
 import { isAdminEmail } from '../config/env.js';
-import { getProfile, getMyPrompts, getSavedPrompts, getPurchasedPrompts, getTopUpHistory, getTransactions, getBankDetails, setUpiId, setBankDetails, clearBankDetails, deleteAccount, updateProfile } from '../services/me.service.js';
+import { getProfile, getMyPrompts, getSavedPrompts, getPurchasedPrompts, getTopUpHistory, getTransactions, getBankDetails, setUpiId, setFcmToken, setBankDetails, clearBankDetails, deleteAccount, updateProfile } from '../services/me.service.js';
 import { getEarningsSummary, getEarningsByPrompt } from '../services/earnings.service.js';
 import { listNotifications, markNotificationsRead } from '../services/notifications.service.js';
 import { uploadImage } from '../services/storage.service.js';
@@ -165,6 +165,27 @@ router.post('/upi', async (req, res, next) => {
     if (!parsed.success) return next(httpError(400, parsed.error.issues[0]?.message ?? 'Invalid body — expected { upiId: string }'));
     const user = await setUpiId(req.userId, parsed.data.upiId);
     return res.json({ user: serializeUser(user) });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+const fcmTokenSchema = z.object({
+  token: z.string().trim().min(1).max(2048),
+});
+
+/**
+ * POST /me/fcm-token — register/refresh the caller's FCM push token so the
+ * backend can send device notifications (wallet events, prompt sales, bonus
+ * expiry). Body: { token }. Idempotent — the latest token wins. The token is
+ * stored on the users doc but never returned in any response.
+ */
+router.post('/fcm-token', async (req, res, next) => {
+  try {
+    const parsed = fcmTokenSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return next(httpError(400, 'Invalid body — expected { token: string }'));
+    await setFcmToken(req.userId, parsed.data.token);
+    return res.json({ success: true });
   } catch (err) {
     return next(err);
   }

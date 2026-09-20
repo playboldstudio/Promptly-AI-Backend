@@ -739,6 +739,22 @@ Body: `{ "upiId": "name@upi" }` (4–80 chars, `name@upi` shape).
 
 Response: `{ "user": { "…": "serializeUser shape" } }`
 
+### `POST /me/fcm-token` — auth
+
+Register/refresh the caller's FCM push token (for device notifications — wallet
+events, prompt sales, bonus expiry).
+
+Body: `{ "token": "fcm-registration-token" }` (1–2048 chars; idempotent — the
+latest token wins).
+
+Response: `{ "success": true }`
+
+Errors: `400` invalid body (expected `{ token: string }`); `401` signed out.
+
+The token is stored on the `users` doc (`fcmToken` / `fcmTokenUpdatedAt`) but is
+**never** returned in any `serializeUser()` response, and it is cleared on
+`DELETE /me/account`.
+
 ### `GET /me/bank` — auth
 
 Saved bank-transfer details for the withdrawal screen.
@@ -995,22 +1011,32 @@ ids; the raw map keys are never exposed.
 
 ### `GET /payments/wallet/allocate?itemPriceInr=99` — auth
 
-Read-only preview: how an item price would split across wallet buckets
-(deposits → earnings → bonus; bonus capped at 10% of the price).
+Read-only preview: how an item price would split across wallet buckets. For
+paid prompts this mirrors the buy flow **bonus FIRST** (capped at 10% of
+`itemPriceInr`), then **deposits → earnings**.
 
 Response:
 ```json
 {
-  "split": [
-    { "balanceType": "deposits", "amountToUse": 85 },
-    { "balanceType": "earnings", "amountToUse": 9.9 },
-    { "balanceType": "bonus", "amountToUse": 4.1 }
-  ],
+  "itemPriceInr": 99,
+  "bonus": 9.9,
+  "deposits": 49.5,
+  "earnings": 39.6,
   "totalCovered": 99,
-  "remaining": 0
+  "remaining": 0,
+  "split": [
+    { "balanceType": "bonus", "amountToUse": 9.9 },
+    { "balanceType": "deposits", "amountToUse": 49.5 },
+    { "balanceType": "earnings", "amountToUse": 39.6 }
+  ],
+  "wallet": { "earnings": { "amountInr": 60 }, "deposits": { "amountInr": 50 }, "bonus": { "amountInr": 40 } }
 }
 ```
-`split: []` with `remaining` = price when nothing is covered.
+`bonus` / `deposits` / `earnings` are the named per-bucket amounts to use (0 when
+a bucket contributes nothing) — the app's purchase sheet renders these directly.
+`wallet` is the user's available balances (so the UI can show "X of Y").
+`split` is the raw per-bucket list (kept for back-compat). `split: []` with
+`remaining` = price when nothing is covered.
 
 Errors: `400` `itemPriceInr` must be a positive number.
 
@@ -1381,6 +1407,8 @@ Internal doc fields (what a `users` doc *stores* — **not** what APIs return):
   "bankIfsc": null,
   "bankBranch": null,
   "bankAccountImageUrl": null,
+  "fcmToken": null,
+  "fcmTokenUpdatedAt": null,
   "deleted": false,
   "createdAt": "…",
   "updatedAt": "…"
@@ -1627,6 +1655,7 @@ paths; the wallet (`user_wallets`) is the balance source of truth.
 | GET | /me/earnings | ✅ | |
 | GET | /me/earnings/prompts | ✅ | |
 | POST | /me/upi | ✅ | |
+| POST | /me/fcm-token | ✅ | |
 | GET | /me/bank | ✅ | |
 | POST | /me/bank | ✅ | |
 | DELETE | /me/bank | ✅ | |

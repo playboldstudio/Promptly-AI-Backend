@@ -225,6 +225,21 @@ export async function setUpiId(userId, upiId) {
 }
 
 /**
+ * Save/refresh the user's FCM push token. Each device registers its token after
+ * sign-in; the latest one wins (single-token assumption — the push channel is
+ * FCM-only today). The token is stored on the users doc but never serialized in
+ * any API response.
+ */
+export async function setFcmToken(userId, token) {
+  await upsert(COLS.users, userId, {
+    fcmToken: token,
+    fcmTokenUpdatedAt: new Date(),
+    updatedAt: new Date(),
+  });
+  return findByPk(COLS.users, userId);
+}
+
+/**
  * The creator's saved bank-transfer payout details (withdrawal screen).
  * Returns just the fields the UI needs — never the full user row.
  */
@@ -334,6 +349,8 @@ export async function deleteAccount(userId) {
     bankBranch: null,
     panImageUrl: null,
     bankAccountImageUrl: null,
+    fcmToken: null,
+    fcmTokenUpdatedAt: null,
     authProviderId: null,
     updatedAt: new Date(),
   });

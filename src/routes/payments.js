@@ -16,7 +16,7 @@ import { activateSubscriptionFromToken, cancelActiveSubscription } from '../serv
 import { isDepositProduct, isAdFreeProduct } from '../services/payments/products.js';
 import { PRODUCT_TO_PLAN } from '../services/payments/plans.js';
 import { internalProductId, playConsoleProductId } from '../services/payments/playConsoleIds.js';
-import { getWallet, adjustWallet, calculatePaymentSplit, spendFromWallet, buyPromptWithWallet } from '../services/wallet.service.js';
+import { getWallet, adjustWallet, calculatePaymentSplit, spendFromWallet, buyPromptWithWallet, bonusFirstOpts } from '../services/wallet.service.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { parsePaging } from '../utils/paging.js';
 import { httpError } from '../utils/http-error.js';
@@ -178,10 +178,18 @@ router.get('/wallet', async (req, res, next) => {
 });
 
 /**
- * GET /payments/wallet/allocate?itemPriceInr=99 — the payment-source split for an
- * item price: how much comes from each wallet bucket (deposits → earnings →
- * bonus, with the 10% bonus spend cap). Read-only preview — the app shows this
- * before the Play Billing purchase. The actual spend happens at a later phase.
+ * GET /payments/wallet/allocate?itemPriceInr=99 — read-only preview of how the
+ * user would pay for an item from their wallet. Returns how much comes from each
+ * bucket (`bonus` → `deposits` → `earnings`) plus what's left to pay / what they
+ * still owe. Read-only — the actual spend happens at a later phase.
+ *
+ * For paid prompts this mirrors the buy flow exactly: BONUS FIRST, capped at 10%
+ * of `itemPriceInr`, then deposits, then earnings. So for a ₹99 prompt you get:
+ *   { bonus: 9.9, deposits: X, earnings: Y, totalCovered, remaining }
+ * The app renders the per-bucket amounts directly.
+ *
+ * Response also carries the raw `split` list (for back-compat) and the user's
+ * available `wallet` balances so the UI can show "X of Y".
  */
 router.get('/wallet/allocate', async (req, res, next) => {
   try {
@@ -189,8 +197,18 @@ router.get('/wallet/allocate', async (req, res, next) => {
     if (!Number.isFinite(itemPriceInr) || itemPriceInr <= 0) {
       return next(httpError(400, 'itemPriceInr must be a positive number'));
     }
-    const result = await calculatePaymentSplit(req.userId, itemPriceInr);
-    return res.json(result);
+    const result = await calculatePaymentSplit(req.userId, itemPriceInr, bonusFirstOpts(itemPriceInr));
+    const allocation = { bonus: 0, deposits: 0, earnings: 0 };
+    for (const s of result.split) allocation[s.balanceType] = s.amountToUse;
+    const wallet = await getWallet(req.userId);
+    return res.json({
+      itemPriceInr,
+      ...allocation,
+      totalCovered: result.totalCovered,
+      remaining: result.remaining,
+      split: result.split,
+      wallet: wallet.balances,
+    });
   } catch (err) {
     return next(err);
   }
