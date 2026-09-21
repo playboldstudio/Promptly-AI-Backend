@@ -15,7 +15,7 @@ import { voidOneTimePurchase, voidSubscriptionPurchase } from '../services/payme
 import { activateSubscriptionFromToken, cancelActiveSubscription } from '../services/payments/subscriptions.service.js';
 import { isDepositProduct, isAdFreeProduct } from '../services/payments/products.js';
 import { PRODUCT_TO_PLAN } from '../services/payments/plans.js';
-import { internalProductId, playConsoleProductId } from '../services/payments/playConsoleIds.js';
+import { internalProductId } from '../services/payments/playConsoleIds.js';
 import { getWallet, adjustWallet, calculatePaymentSplit, spendFromWallet, buyPromptWithWallet, bonusFirstOpts } from '../services/wallet.service.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { parsePaging } from '../utils/paging.js';
@@ -138,7 +138,17 @@ router.post('/playbilling/void', moneyLimiter, async (req, res, next) => {
       return res.json(result);
     }
 
-    const result = await voidOneTimePurchase({ userId: req.userId, productId, purchaseToken, reason });
+    // Same normalization the verify route applies (line ~82): the Play Console
+    // route exposes raw console ids (`playbold.promptly.deposit_s`,
+    // `playbold.promptly.ad`), but voidOneTimePurchase dispatches on INTERNAL
+    // ids (`deposit_s`, `ad_free`, `prompt_*`). Forgetting this here made every
+    // deposit / ad-free void hit the 400 "Unknown productId for void" branch.
+    const result = await voidOneTimePurchase({
+      userId: req.userId,
+      productId: internalProductId(productId),
+      purchaseToken,
+      reason,
+    });
     if (result.error) return next(httpError(result.error.status, result.error.message));
     return res.json(result);
   } catch (err) {

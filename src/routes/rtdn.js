@@ -26,7 +26,7 @@ router.post('/', async (req, res) => {
 
   try {
     const data = JSON.parse(Buffer.from(message.data, 'base64').toString('utf8'));
-    const result = await handleRTDNEvent(data, req.body.subscription);
+    const result = await handleRTDNEvent(data);
     return res.status(200).json({ received: true, ...result });
   } catch (err) {
     console.error('RTDN handler failed:', err);

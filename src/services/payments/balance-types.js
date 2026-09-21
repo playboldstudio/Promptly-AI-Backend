@@ -48,14 +48,6 @@ export function getBalanceType(id) {
   return BALANCE_TYPES[id] ?? null;
 }
 
-export function isWithdrawable(id) {
-  return BALANCE_TYPES[id]?.withdrawable ?? false;
-}
-
-export function getMaxUsePercent(id) {
-  return BALANCE_TYPES[id]?.maxUsePercent ?? 0;
-}
-
 /** Balance types ordered by priority (deposits → earnings → bonus = spend order). */
 export function getBalanceTypesByPriority() {
   return Object.values(BALANCE_TYPES).sort((a, b) => a.priority - b.priority);

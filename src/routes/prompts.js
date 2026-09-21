@@ -207,7 +207,7 @@ async function createPromptFromMultipart(req, res, next) {
     const urls = [];
     for (const file of allFiles) {
       const contentType = String(file.mimetype ?? 'image/jpeg');
-      const mod = await moderateImage(file.buffer, contentType);
+      const mod = await moderateImage(file.buffer);
       if (!mod.safe) return next(httpError(422, mod.reason));
       const imageUrl = await uploadImage({
         folder: `prompts/${req.userId}`,
@@ -270,7 +270,7 @@ router.post(
 
       // Server-side NSFW moderation — reject adult/racy images for non-admins.
       // Admins are exempt (admin bulk import uses a separate route).
-      const mod = await moderateImage(req.body, contentType);
+      const mod = await moderateImage(req.body);
       if (!mod.safe) {
         return next(httpError(422, mod.reason));
       }

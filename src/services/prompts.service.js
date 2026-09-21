@@ -250,12 +250,15 @@ async function withAuthorsAndSaveState(page, viewerId, limit, offset, total) {
   const authors = authorIds.length ? await getMany(COLS.users, authorIds) : {};
 
   // One query for the viewer's saved prompt ids → savedByMe set membership.
+  // Bounded to the documented catalog cap (PHOTOS_CATALOG_MAX) so a viewer with
+  // many saves isn't silently truncated at the repo's default 50-row limit.
   let savedIds = new Set();
   if (viewerId) {
     const saved = await queryAll({
       collection: COLS.savedPrompts,
       filters: [{ field: 'userId', value: viewerId }],
       fieldMask: ['promptId'],
+      limit: PHOTOS_CATALOG_MAX,
     });
     savedIds = new Set(saved.rows.map((s) => s.promptId));
   }

@@ -10,7 +10,7 @@
  * bonus credit (see wallet.md §4.5).
  */
 
-export const ONE_TIME_PRODUCTS = {
+const ONE_TIME_PRODUCTS = {
   ad_free: {
     id: 'ad_free',
     name: 'Remove Ads (lifetime)',

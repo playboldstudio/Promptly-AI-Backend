@@ -28,11 +28,10 @@ function isAtOrAbove(level, threshold) {
 
 /**
  * Moderate a raw image buffer.
- * @param {Buffer} buffer   — raw image bytes (JPEG/PNG/WebP/etc.)
- * @param {string} mimeType — e.g. 'image/jpeg'
+ * @param {Buffer} buffer — raw image bytes (JPEG/PNG/WebP/etc.)
  * @returns {{ safe: boolean, reason?: string }}
  */
-export async function moderateImage(buffer, mimeType = 'image/jpeg') {
+export async function moderateImage(buffer) {
   let result;
   try {
     [result] = await getClient().annotateImage({

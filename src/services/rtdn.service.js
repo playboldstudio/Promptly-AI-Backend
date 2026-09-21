@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { COLS, findByPk, update, upsert, queryAll } from '../db/firestoreRepo.js';
 import { handleRTDNSubscription } from './payments/subscriptions.service.js';
 import { notify } from './notify.js';
@@ -7,8 +8,8 @@ import { notify } from './notify.js';
  *
  * Google pushes subscription lifecycle events (SUBSCRIPTION_RENEWED /
  * CANCELED / EXPIRED / PAUSED / RESTARTED) via Cloud Pub/Sub. Each message is
- * parsed, deduped by our deterministic doc id (sha256 of the event payload),
- * and dispatched to the subscription service.
+ * parsed, deduped by the sha256 of the event payload, and dispatched to the
+ * subscription service.
  *
  * The HTTP route (routes/rtdn.js) returns 200 even on failure so Pub/Sub does
  * not retry a handler that keeps failing — errors are logged server-side.
@@ -16,16 +17,16 @@ import { notify } from './notify.js';
 
 function dedupeKeyFor(event) {
   const payload = JSON.stringify(event ?? {});
-  return `rtdn_${Buffer.from(payload).toString('hex').slice(0, 64)}`;
+  return `rtdn_${crypto.createHash('sha256').update(payload).digest('hex')}`;
 }
 
-export async function handleRTDNEvent(event, subscriptionName) {
+export async function handleRTDNEvent(event) {
   // Bearer-token / subscription-name verification happens in the route; here we
   // only process the typed event.
   const { purchaseToken, inappProductId, subscriptionNotification } = event ?? {};
   const notification = subscriptionNotification ?? event?.notification;
-  const eventType = notification?.notificationType; // SUBSCRIPTION_RENEWED etc.
-  const token = purchaseToken ?? event?.purchaseToken;
+  const eventType = notification?.notificationType; // numeric per Google's RTDN schema
+  const token = purchaseToken;
 
   // Dedupe — same event can arrive twice from Pub/Sub.
   const dedupeKey = dedupeKeyFor(event);

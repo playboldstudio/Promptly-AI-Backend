@@ -1,6 +1,6 @@
 import { COLS, findByPk, queryAll } from '../../db/firestoreRepo.js';
 import { isAdminEmail } from '../../config/env.js';
-import { planById, basePlanTier } from './plans.js';
+import { planById } from './plans.js';
 
 export async function currentActiveSubscriptionWithPlan(userId) {
   const user = await findByPk(COLS.users, userId);
@@ -55,14 +55,4 @@ export async function hasAdFreeAccess(userId) {
   if (sub?.status === 'active' && sub.plan?.perks?.includes('ad_free')) return true;
 
   return false;
-}
-
-/**
- * Determine the effective plan tier for a user (pro / creator / null).
- * Works for both monthly and annual subscriptions.
- */
-export async function effectivePlanTier(userId) {
-  const sub = await currentActiveSubscriptionWithPlan(userId);
-  if (!sub) return null;
-  return basePlanTier(sub.planId);
 }

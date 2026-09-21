@@ -72,22 +72,27 @@ export async function markNotificationsRead(userId, ids) {
   if (!Array.isArray(ids) || ids.length === 0) return { updated: 0 };
 
   let updated = 0;
-  for (const id of ids) {
-    const doc = await findByPk(COLS.notifications, id);
-    if (!doc || doc.userId !== userId) continue; // not yours → skip silently
-    if (doc.status === 'read') continue;
-    await update(COLS.notifications, id, { status: 'read', readAt: new Date(), updatedAt: new Date() });
-    updated += 1;
+  // Bounded parallel — independent notification docs, no cross-row ordering,
+  // so sequential read+write round-trips (N × 2 against Firestore) collapse to
+  // a small concurrency pool. Excludes the bigger `readAll first` sweep which
+  // is a single call in notifications/sweep.
+  const CONCURRENCY = 8;
+  let cursor = 0;
+  async function worker() {
+    for (;;) {
+      const id = ids[cursor++];
+      if (!id) return;
+      const doc = await findByPk(COLS.notifications, id);
+      if (!doc || doc.userId !== userId) continue; // not yours → skip silently
+      if (doc.status === 'read') continue;
+      await update(COLS.notifications, id, { status: 'read', readAt: new Date(), updatedAt: new Date() });
+      updated += 1;
+    }
   }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, ids.length) }, worker));
   return { updated };
 }
 
-/**
- * Bonus-expiry reminder (plans/wallet.md §5.4). Wraps getBonusExpiringSoon and
- * writes ONE inbox row for the earliest-expiring vintage per user, deduped by
- * the vintage id so the daily sweep never repeats it. Uses
- * `notifyBeforeExpiry` (7 days) from the bonus balance-type config.
- */
 /**
  * Build the bonus-expiry reminder title/body for the earliest-expiring vintage.
  * Pure (testable). `days` is floored at 1 so a vintage expiring today still

@@ -103,7 +103,7 @@ export async function safeVerify(verifyFn) {
 }
 
 /** Acknowledge a purchase — required within 3 days or Google auto-refunds. */
-export async function acknowledgePurchase({ productId, purchaseToken, isSubscription = false }) {
+async function acknowledgePurchase({ productId, purchaseToken, isSubscription = false }) {
   if (isSubscription) {
     await getClient().purchases.subscriptions.acknowledge({
       packageName: env.PLAY_BILLING_PACKAGE_NAME,

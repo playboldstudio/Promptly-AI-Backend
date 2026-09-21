@@ -78,14 +78,6 @@ export const PRODUCT_TO_PLAN = {
   creator_annual: 'creator_annual',
 };
 
-/** Resolve the base plan tier (pro/creator) from any plan id. */
-export function basePlanTier(planId) {
-  if (!planId) return null;
-  if (planId.startsWith('pro')) return 'pro';
-  if (planId.startsWith('creator')) return 'creator';
-  return null;
-}
-
 /** Plan doc from Firestore, falling back to the built-in definition. */
 export async function planById(planId) {
   if (!planId) return null;

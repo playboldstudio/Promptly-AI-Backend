@@ -2,7 +2,7 @@ import { pathToFileURL } from 'node:url';
 import { queryAll } from '../db/firestoreRepo.js';
 import { env } from '../config/env.js';
 import { calculatePlayBillingFee } from '../lib/playBilling.js';
-import { PRODUCT_TO_PLAN, BUILTIN_PLANS } from '../services/payments/plans.js';
+import { BUILTIN_PLANS } from '../services/payments/plans.js';
 
 /**
  * `npm run reconcile` — monthly Play Billing commission reconciliation
@@ -65,7 +65,10 @@ async function main() {
     const m = monthly.get(mk);
 
     // One-time prompt sales — snapshot vs recomputed fee drift check.
-    const isPrompt = p.promptId?.startsWith('prompt_');
+    // Play prompt unlocks stash `promptId: 'prompt_<id>'`; WALLET prompt buys
+    // keep the raw prompt id with `gateway: 'wallet'` (wallet.service.js), which
+    // the old `startsWith('prompt_')` test silently dropped from reconciliation.
+    const isPrompt = p.promptId?.startsWith('prompt_') || (p.gateway === 'wallet' && !p.promptId?.startsWith('deposit_'));
     const isDeposit = p.promptId?.startsWith('deposit_');
     const isAdFree = p.promptId === 'ad_free';
 
