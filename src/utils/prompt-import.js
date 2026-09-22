@@ -93,7 +93,7 @@ export function validateBulkRows(csvText, imagesByName = new Map()) {
     };
   }
 
-  const required = ['title', 'description', 'prompttext', 'category'];
+  const required = ['title', 'prompttext', 'category'];
   const missing = required.filter((c) => !header.includes(c));
   if (missing.length) {
     const labels = { title: 'title', description: 'description', prompttext: 'promptText', category: 'category' };
@@ -123,7 +123,7 @@ export function validateBulkRows(csvText, imagesByName = new Map()) {
     const reasons = [];
     if (!title) reasons.push('Missing title');
     else if (title.length > MAX_TITLE) reasons.push(`Title too long (max ${MAX_TITLE} chars)`);
-    if (!description) reasons.push('Missing description');
+
     else if (description.length > MAX_DESCRIPTION) reasons.push(`Description too long (max ${MAX_DESCRIPTION} chars)`);
     if (!promptText) reasons.push('Missing prompt text');
     if (!imageName) reasons.push('Add an image filename in the Image column — an image is required for every row');

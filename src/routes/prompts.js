@@ -36,7 +36,7 @@ const reportLimiter = rateLimit({ windowMs: 3600_000, max: 5, message: 'Too many
 /** Field rules shared by the JSON body and the multipart form. */
 const promptFieldsSchema = z.object({
   title: z.string().trim().min(1).max(60),
-  description: z.string().trim().min(1).max(100),
+  description: z.string().trim().max(100).optional(),
   promptText: z.string().trim().min(1),
   // Accept "" (empty) and whitespace as "no image" so the schema falls through
   // to the friendly "A cover image is required" check instead of a raw "Invalid

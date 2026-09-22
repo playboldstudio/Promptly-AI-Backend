@@ -54,6 +54,15 @@ export function getBalanceTypesByPriority() {
 }
 
 /** An all-zero wallet doc shape (used when one is missing). */
+
+export function isWithdrawable(id) {
+  return getBalanceType(id)?.withdrawable ?? false;
+}
+
+export function getMaxUsePercent(id) {
+  return getBalanceType(id)?.maxUsePercent ?? 0;
+}
+
 export function zeroBalances() {
   return {
     earnings: 0,
