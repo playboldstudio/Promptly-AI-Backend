@@ -3,7 +3,7 @@ import multer from 'multer';
 import AdmZip from 'adm-zip';
 import { requireAuth } from '../middleware/auth.js';
 import { isAdminEmail } from '../config/env.js';
-import { enqueueBulkUpload } from '../services/bulk-jobs.service.js';
+import { enqueueBulkJob, getBulkJob } from '../services/bulk-jobs.service.js';
 import { bulkUploadPrompts } from '../services/bulk-prompts.service.js';
 import { normalizeImageName, validateBulkRows, IMAGE_MIME_BY_EXT } from '../utils/prompt-import.js';
 import { httpError } from '../utils/http-error.js';
@@ -176,23 +176,19 @@ router.post(
     try {
       const payload = extractImportPayload(req);
       if (payload.error) return next(httpError(400, payload.error));
-      const report = await bulkUploadPrompts({
-        userId: req.userId,
-        adminEmail: req.user.email,
+
+      // Slice A: return 202 + jobId immediately; the worker runs off-request.
+      // We deliberately do NOT call bulkUploadPrompts in this slot — that was
+      // the 100-500-row timeout: the whole pipeline (validate, N GCS uploads,
+      // N batched writes) sat inside the HTTP deadline. The job service runs
+      // the same byte-green pipeline off-request and you poll GET /bulk/jobs.
+      const bulkJob = await enqueueBulkJob({
         csvText: payload.csvText,
         imagesByName: imagesByName(payload.images),
+        userId: req.userId,
+        adminEmail: req.user.email,
       });
-  
-    // Slice A: return 202 + jobId immediately; the worker runs off-request.
-    // bulkUploadPrompts itself is unchanged (still byte-green + batching); we
-    // only move the EXECUTION out of the HTTP slot so 100-500 rows can't
-    // exceed the request deadline.
-    const bulkJob = await enqueueBulkUpload({
-      csvText: payload.csvText,
-      userId,
-      adminEmail: req.user.email,
-    });
-    return res.status(202).json({ jobId: bulkJob.jobId, status: "queued" });
+      return res.status(202).json({ jobId: bulkJob.jobId, status: "queued" });
     } catch (err) {
       return next(err);
     }
@@ -254,12 +250,35 @@ router.post('/admin/prompts/:id/reject', requireAuth, requireAdmin, async (req, 
  */
 router.post('/admin/prompts/:id/dismiss-report', requireAuth, requireAdmin, async (req, res, next) => {
   try {
-    const result = await dismissReport({ promptId: req.params.id });
-    if (result.error) return next(httpError(result.error.status, result.error.message));
-    return res.json(result);
-  } catch (err) {
-    return next(err);
-  }
-});
+      const result = await dismissReport({ promptId: req.params.id });
+      if (result.error) return next(httpError(result.error.status, result.error.message));
+      return res.json(result);
+    } catch (err) {
+      return next(err);
+    }
+  },
+);
+
+/**
+ * GET /admin/prompts/bulk/jobs/:jobId — Slice A polling. The 202 from
+ * POST bulk-upload returns this jobId; poll here for status/progress/errors
+ * instead of keeping the import inside the request slot.
+ */
+router.get(
+  '/admin/prompts/bulk/jobs/:jobId',
+  requireAuth,
+  requireAdmin,
+  async (req, res, next) => {
+    try {
+      const job = getBulkJob(req.params.jobId);
+      if (job.status === 'not_found') {
+        return next(httpError(404, `No bulk job with id ${req.params.jobId}`));
+      }
+      return res.json(job);
+    } catch (err) {
+      return next(err);
+    }
+  },
+);
 
 export default router;
