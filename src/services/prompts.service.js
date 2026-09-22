@@ -174,7 +174,7 @@ async function listInTimeWindow({ range, viewerId, limit, offset }) {
  * with its exact count plus the newest `previewLimit` prompts (enriched with
  * author + savedByMe). `paid` narrows the rails to free/paid only.
  */
-export async function listPromptCategories({ previewLimit = 4, paid, viewerId } = {}) {
+export async function listPromptCategories({ previewLimit = 4, paid, viewerId, trending = false } = {}) {
   const safe = Math.max(1, Math.min(10, Number(previewLimit) || 4));
 
   const { rows } = await queryAll({
@@ -207,9 +207,9 @@ export async function listPromptCategories({ previewLimit = 4, paid, viewerId } 
   const categories = PROMPT_CATEGORIES.map((category) => ({
     category,
     count: counts.get(category) ?? 0,
-    previews: (groups.get(category) ?? [])
-      .map((r) => enrichedById.get(r.id))
-      .filter(Boolean),
+    previews: (trending
+      ? (groups.get(category) ?? []).map((r) => enrichedById.get(r.id)).filter(Boolean).sort((a, b) => Number(b.viewCount ?? 0) - Number(a.viewCount ?? 0)).slice(0, safe)
+      : (groups.get(category) ?? []).map((r) => enrichedById.get(r.id)).filter(Boolean)),
   }));
 
   return { categories, total };
