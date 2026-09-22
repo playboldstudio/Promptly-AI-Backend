@@ -3,6 +3,7 @@ import multer from 'multer';
 import AdmZip from 'adm-zip';
 import { requireAuth } from '../middleware/auth.js';
 import { isAdminEmail } from '../config/env.js';
+import { enqueueBulkUpload } from '../services/bulk-jobs.service.js';
 import { bulkUploadPrompts } from '../services/bulk-prompts.service.js';
 import { normalizeImageName, validateBulkRows, IMAGE_MIME_BY_EXT } from '../utils/prompt-import.js';
 import { httpError } from '../utils/http-error.js';
@@ -181,7 +182,17 @@ router.post(
         csvText: payload.csvText,
         imagesByName: imagesByName(payload.images),
       });
-      return res.status(201).json(report);
+  
+    // Slice A: return 202 + jobId immediately; the worker runs off-request.
+    // bulkUploadPrompts itself is unchanged (still byte-green + batching); we
+    // only move the EXECUTION out of the HTTP slot so 100-500 rows can't
+    // exceed the request deadline.
+    const bulkJob = await enqueueBulkUpload({
+      csvText: payload.csvText,
+      userId,
+      adminEmail: req.user.email,
+    });
+    return res.status(202).json({ jobId: bulkJob.jobId, status: "queued" });
     } catch (err) {
       return next(err);
     }
